@@ -1,0 +1,9 @@
+{
+  "id": "brain-board",
+  "name": "Brain Board",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Kanban board for AI coding sessions and Obsidian tasks. Currently supports Claude Code.",
+  "author": "snyt45",
+  "isDesktopOnly": true
+}
