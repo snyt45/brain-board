@@ -1,27 +1,27 @@
 # Brain Board for Obsidian
 
-Kanban board for summarizing and tracking Claude Code sessions as well as managing your Obsidian tasks.
+Claude Codeのセッションを要約・追跡する機能と、Obsidianのタスク管理を統合するカンバンボードプラグインです。
 
-## Features
+## 主な機能
 
-- **Double Boards**: Includes a "Claude" tab for your Claude Code sessions and an "Obsidian" tab for your daily tasks.
-- **Drag & Drop**: Easily move cards across lanes (e.g., Todo, Doing, Done).
-- **Auto-Sync Tasks**: Moving tasks updates their checkboxes in your Markdown notes, and changing checkboxes in Markdown instantly updates the board!
-- **Customizable Columns**: Add, rename, or remove lanes, matching your preferred workflow.
-- **Draggable Tabs**: Reorder your board tabs just by dragging them.
+- **ダブルボード構成**: Claude Codeのセッションを管理する「Claude」タブと、日々のタスクを管理する「Obsidian」タブを搭載。
+- **ドラッグ＆ドロップ**: タスクやセッションのカードを、Todo、Doing、Done等のレーンへ直感的に移動。
+- **タスクの自動同期**: ボードでタスクを移動させると、Markdownノート上のチェックボックス(`- [ ]` ↔ `- [x]`)も自動で更新。逆にノートを書き換えればボードにも即座に反映されます。
+- **カスタマイズ可能なレーン**: ワークフローに合わせてレーンの追加・名前変更・削除が可能。
+- **タブの入れ替え**: ドラッグ＆ドロップでタブ自体の並び順も自由に変更可能です。
 
-## Installation
+## インストール方法
 
-(Manual Installation)
-1. Download `main.js`, `manifest.json`, and `styles.css` from the Release page.
-2. Put them in your Vault's `.obsidian/plugins/brain-board/` folder.
-3. Reload Obsidian and enable "Brain Board".
+1. リリースページ（Releases）から `main.js`, `manifest.json`, `styles.css` をダウンロードします。
+2. ObsidianのVault内の `.obsidian/plugins/brain-board/` フォルダに配置します。
+3. Obsidianを再起動またはリロードし、コミュニティプラグイン設定から「Brain Board」を有効化します。
 
-## Configuration
-- **Claude Path**: Where your Claude Code `.claude` directory is located (default: `~/.claude`).
-- **Task Search Directory**: Limit task scanning to a specific folder within your vault (e.g., `10_Journal`). Leave empty to scan the entire vault.
-- **Storage Directory**: Where the plugin stores its board state `sessions.json` (default: `.brain-board`).
+## 設定
 
-## License
+- **Claude Path**: Claude Codeの `.claude` ディレクトリの場所（デフォルト: `~/.claude`）。
+- **Task Search Directory**: タスクスキャンの対象とするVault内の特定のフォルダ（例: `10_Journal`）。空にするとVault全体をスキャンします。
+- **Storage Directory**: ボードのレーン状態等を保存する `sessions.json` の場所（デフォルト: `.brain-board`）。
+
+## ライセンス
 
 MIT
