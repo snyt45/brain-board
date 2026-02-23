@@ -8,12 +8,14 @@ export interface BrainBoardSettings {
   claudePath: string;
   taskDir: string;
   storageDir: string;
+  taskScanPeriod?: number;
 }
 
 const DEFAULT_SETTINGS: BrainBoardSettings = {
   claudePath: "~/.claude",
   taskDir: "10_Journal",
   storageDir: ".brain-board",
+  taskScanPeriod: 7,
 };
 
 export default class BrainBoardPlugin extends Plugin {
