@@ -2,7 +2,9 @@ import { ItemView, WorkspaceLeaf, Menu, TFile } from "obsidian";
 import { SessionStore } from "../services/SessionStore";
 import { TaskScanner } from "../services/TaskScanner";
 import { TaskUpdater } from "../services/TaskUpdater";
+import { IssueManager } from "../services/IssueManager";
 import { ColumnSettingsModal } from "./components/ColumnSettingsModal";
+import { IssueDrawer } from "./components/IssueDrawer";
 import { StoredSession } from "../models/Session";
 import { VaultTask, getTaskKey } from "../models/Task";
 import { ColumnDef, NO_STATUS_COLUMN } from "../models/Column";
@@ -26,12 +28,16 @@ export class BoardView extends ItemView {
   private dragBoardType: "claude" | "task" | null = null;
   private lastDroppedId: string | null = null;
 
+  private issueManager: IssueManager;
+  private issueDrawer: IssueDrawer;
+
   constructor(leaf: WorkspaceLeaf, plugin: BrainBoardPlugin, store: SessionStore) {
     super(leaf);
     this.plugin = plugin;
     this.store = store;
     this.scanner = new TaskScanner(plugin);
     this.taskUpdater = new TaskUpdater(this.app);
+    this.issueManager = new IssueManager(plugin);
   }
 
   getViewType(): string { return BOARD_VIEW_TYPE; }
@@ -39,6 +45,9 @@ export class BoardView extends ItemView {
   getIcon(): string { return "check-square"; }
 
   async onOpen(): Promise<void> {
+    // view-content自体(children[1])ではなく、全体のコンテナに付与して render() 時の empty() から守る
+    this.issueDrawer = new IssueDrawer(this.app, this.containerEl, this.issueManager);
+
     this.unsubscribe = this.store.subscribe(() => this.render());
     await this.refresh();
 
@@ -388,6 +397,19 @@ export class BoardView extends ItemView {
     });
     info.createEl("span", { text: `${session.messageCount} msgs`, cls: "card-date" });
 
+    card.addEventListener("click", () => {
+      let content = "";
+      if (session.fullPath) {
+        content = this.plugin.claudeReader.readSessionLogAsMarkdown(session.fullPath);
+      }
+      this.issueDrawer.open({
+        key: session.id,
+        title: session.summary || "Untitled",
+        isClaude: true,
+        claudeContent: content
+      });
+    });
+
     card.addEventListener("dragstart", (e) => {
       this.dragType = "session"; this.dragId = session.id; card.addClass("card-dragging");
     });
@@ -405,11 +427,22 @@ export class BoardView extends ItemView {
     const meta = card.createDiv({ cls: "card-meta" });
     meta.createEl("span", { text: task.filePath.split("/").pop() || "", cls: "card-tag" });
 
-    card.addEventListener("click", async () => {
-      const file = this.app.vault.getAbstractFileByPath(task.filePath);
-      if (file instanceof TFile) {
-        const leaf = this.app.workspace.getLeaf(false);
-        await leaf.openFile(file, { eState: { line: task.line - 1 } });
+    card.addEventListener("click", async (e: MouseEvent) => {
+      // CMD/Ctrl click: open file
+      if (e.metaKey || e.ctrlKey) {
+        const file = this.app.vault.getAbstractFileByPath(task.filePath);
+        if (file instanceof TFile) {
+          const leaf = this.app.workspace.getLeaf(false);
+          await leaf.openFile(file, { eState: { line: task.line - 1 } });
+        }
+      } else {
+        // Normal click: open Issue Drawer
+        this.issueDrawer.open({
+          key: key,
+          title: task.text,
+          filePath: task.filePath,
+          line: task.line
+        });
       }
     });
 

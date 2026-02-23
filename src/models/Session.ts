@@ -9,4 +9,5 @@ export interface StoredSession {
   messageCount: number;
   gitBranch: string;
   status: SessionStatus;
+  fullPath?: string;
 }

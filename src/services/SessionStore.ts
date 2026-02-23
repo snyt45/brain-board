@@ -135,6 +135,7 @@ export class SessionStore {
       existing.summary = session.summary;
       existing.modified = session.modified;
       existing.messageCount = session.messageCount;
+      if (session.fullPath) existing.fullPath = session.fullPath;
     } else {
       this.data.sessions.push({ ...session, status: defaultStatus });
     }
@@ -191,6 +192,7 @@ export class SessionStore {
           id: cs.sessionId, project, summary: cs.summary,
           created: cs.created, modified: cs.modified,
           messageCount: cs.messageCount, gitBranch: cs.gitBranch,
+          fullPath: cs.fullPath,
         });
       }
     }

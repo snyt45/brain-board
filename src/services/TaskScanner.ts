@@ -15,34 +15,51 @@ export class TaskScanner {
     const tasks: VaultTask[] = [];
     const settings = (this.plugin as any).settings;
     const folder = settings?.taskDir || "";
-    const files = this.plugin.app.vault.getFiles();
-    const targetFiles = folder 
-      ? files.filter((f) => f.path.startsWith(folder) && f.extension === "md")
-      : files.filter((f) => f.extension === "md");
+    const scanPeriod = settings?.taskScanPeriod; // number or undefined
 
-    // Only scan recent files (last 7 days)
-    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const recentFiles = targetFiles.filter((f) => f.stat.mtime > weekAgo);
+    const files = this.plugin.app.vault.getMarkdownFiles();
+    const targetFiles = folder 
+      ? files.filter((f) => f.path.startsWith(folder))
+      : files;
+
+    const thresholdTime = scanPeriod ? Date.now() - scanPeriod * 24 * 60 * 60 * 1000 : 0;
+    const recentFiles = thresholdTime > 0 
+      ? targetFiles.filter((f) => f.stat.mtime > thresholdTime)
+      : targetFiles;
 
     for (const file of recentFiles) {
+      const cache = this.plugin.app.metadataCache.getFileCache(file);
+      if (!cache || !cache.listItems) continue;
+
+      // Extract only list items that are tasks (have a checkbox)
+      const taskItems = cache.listItems.filter((item) => item.task !== undefined);
+      if (taskItems.length === 0) continue;
+
+      // We still need the file content to get the actual text and exact completion status,
+      // but we only read files that we KNOW have tasks.
       const content = await this.plugin.app.vault.cachedRead(file);
       const lines = content.split("\n");
 
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const taskMatch = line.match(/^(\s*)- \[([ x])\] (.+)$/);
-        if (taskMatch) {
-          const completed = taskMatch[2] === "x";
-          const text = taskMatch[3].trim();
-          const tags = this.extractTags(text);
+      for (const item of taskItems) {
+        // listItems.position.start.line is 0-indexed
+        const lineIdx = item.position.start.line;
+        if (lineIdx >= 0 && lineIdx < lines.length) {
+           const lineText = lines[lineIdx];
+           const taskMatch = lineText.match(/^(\s*)- \[([ x])\] (.+)$/i);
+           
+           if (taskMatch) {
+              const completed = taskMatch[2].toLowerCase() === "x";
+              const text = taskMatch[3].trim();
+              const tags = this.extractTags(text);
 
-          tasks.push({
-            text,
-            completed,
-            filePath: file.path,
-            line: i + 1,
-            tags,
-          });
+              tasks.push({
+                text,
+                completed,
+                filePath: file.path,
+                line: lineIdx + 1, // 1-indexed for VaultTask
+                tags,
+              });
+           }
         }
       }
     }

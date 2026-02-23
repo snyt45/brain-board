@@ -41,6 +41,26 @@ export class BrainBoardSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Task Scan Period (days)")
+      .setDesc("Number of past days to scan for tasks. Leave empty to scan all files (no limit).")
+      .addText((text) =>
+        text
+          .setPlaceholder("7")
+          .setValue(this.plugin.settings.taskScanPeriod?.toString() ?? "")
+          .onChange(async (value) => {
+            if (value.trim() === "") {
+              this.plugin.settings.taskScanPeriod = undefined as any; // Save as undefined/null in json
+            } else {
+              const parsed = parseInt(value, 10);
+              if (!isNaN(parsed) && parsed > 0) {
+                 this.plugin.settings.taskScanPeriod = parsed;
+              }
+            }
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Storage Directory")
       .setDesc("The vault directory to store boards data (.obsidian/plugins/brain-board/data/ etc). Requires reload.")
       .addText((text) =>
