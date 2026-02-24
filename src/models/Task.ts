@@ -4,6 +4,8 @@ export interface VaultTask {
   filePath: string;
   line: number;
   tags: string[];
+  ctime: number;
+  mtime: number;
 }
 
 // Stable key for a task (file path + text, not line number which shifts)

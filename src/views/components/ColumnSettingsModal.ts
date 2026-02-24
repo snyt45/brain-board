@@ -8,7 +8,6 @@ const PRESET_COLORS = [
 
 export class ColumnSettingsModal extends Modal {
   private col: ColumnDef;
-  private type: "claude" | "task";
   private onSave: (updates: Partial<ColumnDef>) => void;
   private label: string;
   private description: string;
@@ -16,10 +15,9 @@ export class ColumnSettingsModal extends Modal {
   private completesTask: boolean;
   private hideCompletesTask: boolean;
 
-  constructor(app: App, col: ColumnDef, type: "claude" | "task", hideCompletesTask: boolean, onSave: (updates: Partial<ColumnDef>) => void) {
+  constructor(app: App, col: ColumnDef, hideCompletesTask: boolean, onSave: (updates: Partial<ColumnDef>) => void) {
     super(app);
     this.col = col;
-    this.type = type;
     this.onSave = onSave;
     this.label = col.label;
     this.description = col.description;
@@ -56,8 +54,8 @@ export class ColumnSettingsModal extends Modal {
       });
     }
 
-    // Toggle
-    if (this.type === "task" && !this.hideCompletesTask) {
+    // Done column toggle
+    if (!this.hideCompletesTask) {
       new Setting(contentEl).setName("Done Column")
         .setDesc("Tasks dropped here will be marked as complete")
         .addToggle((toggle) => {
@@ -70,8 +68,8 @@ export class ColumnSettingsModal extends Modal {
     const saveBtn = footer.createEl("button", { text: "Save", cls: "mod-cta" });
     saveBtn.addEventListener("click", () => {
       this.onSave({
-        label: this.label, description: this.description, color: this.color,
-        completesTask: this.type === "task" ? this.completesTask : undefined,
+        label: this.label, description: this.description,
+        color: this.color, completesTask: this.completesTask,
       });
       this.close();
     });

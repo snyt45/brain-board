@@ -5,31 +5,38 @@ import { TaskUpdater } from "../services/TaskUpdater";
 import { IssueManager } from "../services/IssueManager";
 import { ColumnSettingsModal } from "./components/ColumnSettingsModal";
 import { IssueDrawer } from "./components/IssueDrawer";
-import { StoredSession } from "../models/Session";
 import { VaultTask, getTaskKey } from "../models/Task";
 import { ColumnDef, NO_STATUS_COLUMN } from "../models/Column";
 import type BrainBoardPlugin from "../../main";
 
 export const BOARD_VIEW_TYPE = "brain-board-view";
-type TabId = "claude" | "tasks";
 
 export class BoardView extends ItemView {
   private store: SessionStore;
   private scanner: TaskScanner;
   private taskUpdater: TaskUpdater;
   private plugin: BrainBoardPlugin;
-  private activeTab: TabId = "tasks";
+
+  // View state
+  private sortState: { field: "manual" | "created" | "modified"; dir: "desc" | "asc" } = { field: "manual", dir: "desc" };
+  private showMetadata = true;
   private tasks: VaultTask[] = [];
   private unsubscribe: (() => void) | null = null;
 
-  // D&D state
-  private dragType: "session" | "task" | "column" | "tab" | null = null;
+  // Drag & drop state
+  private dragType: "task" | "column" | null = null;
   private dragId: string | null = null;
-  private dragBoardType: "claude" | "task" | null = null;
   private lastDroppedId: string | null = null;
 
+  // Selection state
+  private selectedKeys = new Set<string>();
+  private lastClickedKey: string | null = null;
+  private isSelecting = false;
+  private selectionStart: { x: number; y: number } | null = null;
+  private selectionRectEl: HTMLElement | null = null;
+
   private issueManager: IssueManager;
-  private issueDrawer: IssueDrawer;
+  private issueDrawer!: IssueDrawer;
 
   constructor(leaf: WorkspaceLeaf, plugin: BrainBoardPlugin, store: SessionStore) {
     super(leaf);
@@ -41,39 +48,41 @@ export class BoardView extends ItemView {
   }
 
   getViewType(): string { return BOARD_VIEW_TYPE; }
-  getDisplayText(): string { return "AI Kanban Board"; }
+  getDisplayText(): string { return "Brain Board"; }
   getIcon(): string { return "check-square"; }
 
-  async onOpen(): Promise<void> {
-    // view-content自体(children[1])ではなく、全体のコンテナに付与して render() 時の empty() から守る
-    this.issueDrawer = new IssueDrawer(this.app, this.containerEl, this.issueManager);
+  // ═══════════════════════════════════════════════════════
+  // Lifecycle
+  // ═══════════════════════════════════════════════════════
 
+  async onOpen(): Promise<void> {
+    this.issueDrawer = new IssueDrawer(this.app, this.containerEl, this.issueManager);
     this.unsubscribe = this.store.subscribe(() => this.render());
     await this.refresh();
+    document.addEventListener("keydown", this.onKeyDown);
 
     this.registerEvent(
+      this.app.workspace.on("brain-board:refresh" as any, () => this.refresh())
+    );
+    this.registerEvent(
       this.app.metadataCache.on("changed", (file) => {
-        // Only refresh task board if a relevant file changes (to avoid aggressive reloading on Claude)
-        // Check if file is inside the configured taskDir, or if taskDir is empty (meaning entire vault)
         const targetDir = this.plugin.settings.taskDir;
-        if (!targetDir || file.path.startsWith(targetDir)) {
-          if (this.activeTab === "tasks") {
-            this.refresh();
-          }
-        }
+        if (!targetDir || file.path.startsWith(targetDir)) this.refresh();
       })
     );
   }
 
   async onClose(): Promise<void> {
     if (this.unsubscribe) this.unsubscribe();
+    document.removeEventListener("keydown", this.onKeyDown);
   }
 
   async refresh(): Promise<void> {
-    if (this.activeTab === "tasks") {
-      this.tasks = await this.scanner.scanTasks();
-      this.store.syncTaskAssignments(this.tasks, this.store.getColumns("task"));
-    }
+    const pinnedFiles = this.store.getPinnedFilePaths();
+    this.tasks = await this.scanner.scanTasks(pinnedFiles);
+    this.store.syncTaskAssignments(this.tasks, this.store.getColumns());
+    this.selectedKeys.clear();
+    this.lastClickedKey = null;
     this.render();
   }
 
@@ -83,267 +92,196 @@ export class BoardView extends ItemView {
 
   private render(): void {
     const root = this.containerEl.children[1] as HTMLElement;
-    
-    // Save scroll positions before tear down
+
+    // Preserve scroll positions
     const scrollMap = new Map<string, number>();
     root.querySelectorAll(".kanban-cards").forEach((el) => {
       const parent = el.closest(".kanban-column") as HTMLElement;
-      if (parent && parent.dataset.columnId) {
-         scrollMap.set(parent.dataset.columnId, el.scrollTop);
-      }
+      if (parent?.dataset.columnId) scrollMap.set(parent.dataset.columnId, el.scrollTop);
     });
 
     root.empty();
     root.addClass("board-root");
 
-    const tabs = root.createDiv({ cls: "board-tabs" });
-    const tabOrder = this.store.getTabOrder();
-    for (const id of tabOrder) {
-      if (id === "tasks") this.renderTab(tabs, "tasks", "Obsidian");
-      if (id === "claude") this.renderTab(tabs, "claude", "Claude");
-    }
+    // ── Controls ──
+    this.renderControls(root);
 
+    // ── Bulk Action Bar ──
+    if (this.selectedKeys.size > 0) this.renderBulkActionBar(root);
+
+    // ── Board ──
     const content = root.createDiv({ cls: "board-content" });
-    if (this.activeTab === "claude") this.renderClaudeBoard(content);
-    else this.renderTaskBoard(content);
+    this.renderBoard(content);
 
     // Restore scroll positions
     root.querySelectorAll(".kanban-cards").forEach((el) => {
       const parent = el.closest(".kanban-column") as HTMLElement;
-      if (parent && parent.dataset.columnId && scrollMap.has(parent.dataset.columnId)) {
-         el.scrollTop = scrollMap.get(parent.dataset.columnId)!;
+      if (parent?.dataset.columnId && scrollMap.has(parent.dataset.columnId)) {
+        el.scrollTop = scrollMap.get(parent.dataset.columnId)!;
       }
     });
   }
 
-  private renderTab(container: HTMLElement, id: TabId, label: string): void {
-    const active = this.activeTab === id;
-    const tab = container.createEl("button", {
-      text: label,
-      cls: `board-tab${active ? " board-tab-active" : ""}`,
-    });
-    tab.addEventListener("click", async () => {
-      if (this.activeTab !== id) { this.activeTab = id; await this.refresh(); }
-    });
+  private renderControls(root: HTMLElement): void {
+    const controls = root.createDiv({ cls: "board-controls" });
+    const state = this.sortState;
 
-    tab.draggable = true;
-    tab.dataset.tabId = id;
-
-    tab.addEventListener("dragstart", (e) => {
-      this.dragType = "tab";
-      this.dragId = id;
-      tab.addClass("tab-dragging");
-      e.dataTransfer?.setData("text/plain", id);
-    });
-
-    tab.addEventListener("dragend", () => {
-      this.resetDrag();
-      tab.removeClass("tab-dragging");
-    });
-
-    tab.addEventListener("dragover", (e) => {
-      if (this.dragType === "tab" && this.dragId !== id) {
-        e.preventDefault();
-        const rect = tab.getBoundingClientRect();
-        const mid = rect.left + rect.width / 2;
-        container.querySelectorAll(".tab-drop-left, .tab-drop-right").forEach(el => {
-          el.removeClass("tab-drop-left"); el.removeClass("tab-drop-right");
-        });
-        tab.addClass(e.clientX < mid ? "tab-drop-left" : "tab-drop-right");
+    const toggleSort = (field: "created" | "modified") => {
+      if (state.field === field) {
+        if (state.dir === "desc") state.dir = "asc";
+        else { state.field = "manual"; state.dir = "desc"; }
+      } else {
+        state.field = field; state.dir = "desc";
       }
-    });
+      this.render();
+    };
 
-    tab.addEventListener("dragleave", () => {
-      tab.removeClass("tab-drop-left"); 
-      tab.removeClass("tab-drop-right");
-    });
+    const mkBtn = (label: string, field: "created" | "modified") => {
+      const arrow = state.field === field ? (state.dir === "desc" ? " ↓" : " ↑") : "";
+      const cls = `sort-toggle${state.field === field ? " sort-toggle-active" : ""}`;
+      const btn = controls.createEl("button", { text: label + arrow, cls });
+      btn.addEventListener("click", () => toggleSort(field));
+    };
+    mkBtn("Created", "created");
+    mkBtn("Modified", "modified");
 
-    tab.addEventListener("drop", (e) => {
-      if (this.dragType === "tab" && this.dragId) {
-        e.preventDefault(); 
-        e.stopPropagation();
-        
-        const rect = tab.getBoundingClientRect();
-        const currentOrder = this.store.getTabOrder();
-        const dragIdx = currentOrder.indexOf(this.dragId);
-        let targetIdx = currentOrder.indexOf(id);
-        
-        if (e.clientX >= rect.left + rect.width / 2) targetIdx++;
-        if (dragIdx < targetIdx) targetIdx--;
-        
-        if (dragIdx !== targetIdx && targetIdx >= 0) {
-          const newOrder = [...currentOrder];
-          const [removed] = newOrder.splice(dragIdx, 1);
-          newOrder.splice(targetIdx, 0, removed);
-          this.store.setTabOrder(newOrder);
-          this.render(); // immediately reflect visual change
-        }
-        this.resetDrag();
-      }
+    controls.createDiv({ cls: "board-control-spacer" });
+
+    const metaBtn = controls.createEl("button", {
+      text: this.showMetadata ? "Hide Meta" : "Show Meta",
+      cls: "board-control-btn"
     });
+    metaBtn.addEventListener("click", () => { this.showMetadata = !this.showMetadata; this.render(); });
   }
 
   // ═══════════════════════════════════════════════════════
-  // Claude Board
+  // Board
   // ═══════════════════════════════════════════════════════
 
-  private renderClaudeBoard(container: HTMLElement): void {
-    const toolbar = container.createDiv({ cls: "board-toolbar" });
-    const syncBtn = toolbar.createEl("button", { text: "Sync", cls: "board-action-btn" });
-    syncBtn.addEventListener("click", () => {
-      this.app.workspace.trigger("brain-board:sync");
-      setTimeout(() => this.render(), 300);
-    });
-
+  private renderBoard(container: HTMLElement): void {
     const board = container.createDiv({ cls: "kanban-board" });
-    const columns = this.store.getColumns("claude");
-    for (let i = 0; i < columns.length; i++) {
-      const col = columns[i];
-      const sessions = this.store.getOrderedSessionsByStatus(col.id);
-      this.renderColumn(board, col, i, "claude", sessions.length, (cards) => {
-        for (const s of sessions) this.renderSessionCard(cards, s);
-      });
-    }
-    this.renderAddColumnBtn(board, "claude");
-  }
-
-  // ═══════════════════════════════════════════════════════
-  // Task Board
-  // ═══════════════════════════════════════════════════════
-
-  private renderTaskBoard(container: HTMLElement): void {
-    const toolbar = container.createDiv({ cls: "board-toolbar" });
-
-    const board = container.createDiv({ cls: "kanban-board" });
-    const columns = this.store.getColumns("task");
+    const columns = this.store.getColumns();
     const columnTasks = this.assignTasksToColumns(columns);
 
     for (let i = 0; i < columns.length; i++) {
       const col = columns[i];
-      const tasks = columnTasks.get(col.id) || [];
-      const order = this.store.getCardOrder(col.id);
-      let orderedTasks = tasks;
-      if (order) {
-        const indexed = new Map(tasks.map((t) => [getTaskKey(t), t]));
-        orderedTasks = [];
-        for (const id of order) {
-          const t = indexed.get(id);
-          if (t) { orderedTasks.push(t); indexed.delete(id); }
-        }
-        for (const t of indexed.values()) orderedTasks.push(t); // append unassigned to bottom
-      }
-      this.renderColumn(board, col, i, "task", orderedTasks.length, (cards) => {
-        for (const t of orderedTasks) this.renderTaskCard(cards, t);
-      });
+      let orderedTasks = this.getOrderedTasks(columnTasks.get(col.id) || [], col.id);
+      this.renderColumn(board, col, i, orderedTasks);
     }
-    this.renderAddColumnBtn(board, "task");
+    this.renderAddColumnBtn(board);
+  }
+
+  private getOrderedTasks(tasks: VaultTask[], colId: string): VaultTask[] {
+    const order = this.store.getCardOrder(colId);
+    let ordered = tasks;
+    if (order) {
+      const indexed = new Map(tasks.map(t => [getTaskKey(t), t]));
+      ordered = [];
+      for (const id of order) {
+        const t = indexed.get(id);
+        if (t) { ordered.push(t); indexed.delete(id); }
+      }
+      for (const t of indexed.values()) ordered.push(t);
+    }
+
+    const s = this.sortState;
+    if (s.field === "created") ordered.sort((a, b) => s.dir === "desc" ? b.ctime - a.ctime : a.ctime - b.ctime);
+    else if (s.field === "modified") ordered.sort((a, b) => s.dir === "desc" ? b.mtime - a.mtime : a.mtime - b.mtime);
+    return ordered;
   }
 
   private assignTasksToColumns(columns: ColumnDef[]): Map<string, VaultTask[]> {
     const result = new Map<string, VaultTask[]>();
     for (const col of columns) result.set(col.id, []);
 
+    const scanPeriod = this.plugin.settings.taskScanPeriod;
+    const threshold = scanPeriod ? Date.now() - scanPeriod * 86400000 : 0;
+
     for (const task of this.tasks) {
+      if (threshold > 0 && task.ctime <= threshold) continue;
       const key = getTaskKey(task);
       const assignedCol = this.store.getTaskColumn(key) || NO_STATUS_COLUMN.id;
-      
-      if (result.has(assignedCol)) {
-        result.get(assignedCol)!.push(task);
-      } else {
-        result.get(NO_STATUS_COLUMN.id)!.push(task);
-      }
+      const bucket = result.get(assignedCol) || result.get(NO_STATUS_COLUMN.id)!;
+      bucket.push(task);
     }
     return result;
   }
 
   // ═══════════════════════════════════════════════════════
-  // Column (shared)
+  // Column
   // ═══════════════════════════════════════════════════════
 
-  private renderColumn(
-    board: HTMLElement, col: ColumnDef, index: number,
-    boardType: "claude" | "task", count: number,
-    renderCards: (cardsEl: HTMLElement) => void
-  ): void {
+  private renderColumn(board: HTMLElement, col: ColumnDef, index: number, tasks: VaultTask[]): void {
     const column = board.createDiv({ cls: "kanban-column" });
     column.dataset.columnId = col.id;
     column.dataset.columnIndex = String(index);
-
     const isSystemCol = col.id === NO_STATUS_COLUMN.id;
 
+    // ── Header ──
     const header = column.createDiv({ cls: "kanban-column-header" });
     if (!isSystemCol) header.draggable = true;
 
     const headerMain = header.createDiv({ cls: "kanban-column-header-main" });
-
     const titleWrap = headerMain.createDiv({ cls: "kanban-column-title-wrap" });
     const dot = titleWrap.createEl("span", { cls: "kanban-color-dot" });
     dot.style.backgroundColor = col.color;
     titleWrap.createEl("span", { text: col.label, cls: "kanban-column-title" });
 
     const rightWrap = headerMain.createDiv({ cls: "kanban-column-right" });
-    rightWrap.createEl("span", { text: String(count), cls: "kanban-column-count" });
+    rightWrap.createEl("span", { text: String(tasks.length), cls: "kanban-column-count" });
 
     if (!isSystemCol) {
       const menuBtn = rightWrap.createEl("button", { text: "⋯", cls: "column-menu-btn" });
-      menuBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.showColumnMenu(e, boardType, col);
-      });
+      menuBtn.addEventListener("click", (e) => { e.stopPropagation(); this.showColumnMenu(e, col); });
 
       header.addEventListener("dragstart", (e) => {
-        this.dragType = "column"; this.dragId = col.id; this.dragBoardType = boardType;
+        this.dragType = "column"; this.dragId = col.id;
         header.addClass("column-dragging");
         e.dataTransfer?.setData("text/plain", col.id);
       });
-      header.addEventListener("dragend", () => {
-        this.resetDrag(); header.removeClass("column-dragging");
-      });
+      header.addEventListener("dragend", () => { this.resetDrag(); header.removeClass("column-dragging"); });
     }
 
-    if (col.description) {
-      header.createDiv({ text: col.description, cls: "kanban-column-desc" });
-    }
+    if (col.description) header.createDiv({ text: col.description, cls: "kanban-column-desc" });
 
-    // Drop on column header/body (reordering columns)
+    // ── Column D&D ──
     column.addEventListener("dragover", (e) => {
-      if (this.dragType === "column" && this.dragBoardType === boardType && this.dragId !== col.id && !isSystemCol) {
+      if (this.dragType === "column" && this.dragId !== col.id && !isSystemCol) {
         e.preventDefault();
         this.clearColumnIndicators(board);
         const rect = column.getBoundingClientRect();
-        const mid = rect.left + rect.width / 2;
-        column.addClass(e.clientX < mid ? "column-drop-left" : "column-drop-right");
+        column.addClass(e.clientX < rect.left + rect.width / 2 ? "column-drop-left" : "column-drop-right");
       }
     });
-
     column.addEventListener("dragleave", () => {
       column.removeClass("column-drop-left"); column.removeClass("column-drop-right");
     });
-
     column.addEventListener("drop", (e) => {
-      if (this.dragType === "column" && this.dragId && this.dragBoardType === boardType) {
+      if (this.dragType === "column" && this.dragId) {
         e.preventDefault(); e.stopPropagation();
         if (isSystemCol) { this.resetDrag(); return; }
-
-        const rect = column.getBoundingClientRect();
-        const cols = this.store.getColumns(boardType);
-        const dragIdx = cols.findIndex((c) => c.id === this.dragId);
+        const cols = this.store.getColumns();
+        const dragIdx = cols.findIndex(c => c.id === this.dragId);
         let targetIdx = index;
+        const rect = column.getBoundingClientRect();
         if (e.clientX >= rect.left + rect.width / 2) targetIdx++;
         if (dragIdx < targetIdx) targetIdx--;
-        if (dragIdx !== targetIdx && targetIdx >= 1) { // 1 to preserve NO_STATUS at 0
-          this.store.moveColumn(boardType, this.dragId, targetIdx);
-        }
+        if (dragIdx !== targetIdx && targetIdx >= 1) this.store.moveColumn(this.dragId, targetIdx);
         this.resetDrag();
       }
     });
 
+    // ── Cards ──
     const cards = column.createDiv({ cls: "kanban-cards" });
-    this.setupCardDropZone(cards, col, boardType);
-    renderCards(cards);
+    if (tasks.length === 0) {
+      cards.createDiv({ cls: "kanban-empty-state", text: "Drop tasks here" });
+    }
+    this.setupCardDropZone(cards, col);
+    this.setupLassoSelect(cards);
+    for (const t of tasks) this.renderTaskCard(cards, t);
   }
 
-  private renderAddColumnBtn(board: HTMLElement, type: "claude" | "task"): void {
+  private renderAddColumnBtn(board: HTMLElement): void {
     const addCol = board.createDiv({ cls: "kanban-add-column" });
     const addBtn = addCol.createEl("button", { text: "+ Column", cls: "add-column-btn" });
     addBtn.addEventListener("click", () => {
@@ -355,20 +293,14 @@ export class BoardView extends ItemView {
         const label = input.value.trim();
         if (label) {
           const id = label.toLowerCase().replace(/[^a-z0-9]+/g, "_") + "_" + Date.now().toString(36);
-          this.store.addColumn(type, { id, label, description: "", color: "#868e96" });
+          this.store.addColumn({ id, label, description: "", color: "#868e96" });
         } else {
-          this.render(); // Redraw button
+          this.render();
         }
       };
-
       input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          input.blur(); // Trigger commit via blur
-        }
-        if (e.key === "Escape") {
-          input.value = ""; // Clear so it doesn't commit
-          input.blur();
-        }
+        if (e.key === "Enter") input.blur();
+        if (e.key === "Escape") { input.value = ""; input.blur(); }
       });
       input.addEventListener("blur", commit);
     });
@@ -378,89 +310,193 @@ export class BoardView extends ItemView {
   // Cards
   // ═══════════════════════════════════════════════════════
 
-  private renderSessionCard(container: HTMLElement, session: StoredSession): void {
-    const card = container.createDiv({ cls: "kanban-card" });
-    if (session.id === this.lastDroppedId) card.addClass("card-highlight");
-    card.draggable = true;
-    card.dataset.cardId = session.id;
+  private formatAge(ms: number): string {
+    const days = Math.floor(ms / 86400000);
+    if (days === 0) return "Today";
+    if (days === 1) return "1d ago";
+    return `${days}d ago`;
+  }
 
-    card.createEl("div", { text: session.summary || "Untitled", cls: "card-title" });
-    const meta = card.createDiv({ cls: "card-meta" });
-    meta.createEl("span", { text: session.project, cls: "card-tag" });
-    if (session.gitBranch) meta.createEl("span", { text: session.gitBranch, cls: "card-tag card-branch" });
-
-    const info = card.createDiv({ cls: "card-info" });
-    const d = new Date(session.modified);
-    info.createEl("span", {
-      text: `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`,
-      cls: "card-date",
-    });
-    info.createEl("span", { text: `${session.messageCount} msgs`, cls: "card-date" });
-
-    card.addEventListener("click", () => {
-      let content = "";
-      if (session.fullPath) {
-        content = this.plugin.claudeReader.readSessionLogAsMarkdown(session.fullPath);
-      }
-      this.issueDrawer.open({
-        key: session.id,
-        title: session.summary || "Untitled",
-        isClaude: true,
-        claudeContent: content
-      });
-    });
-
-    card.addEventListener("dragstart", (e) => {
-      this.dragType = "session"; this.dragId = session.id; card.addClass("card-dragging");
-    });
-    card.addEventListener("dragend", () => { this.resetDrag(); card.removeClass("card-dragging"); });
+  private formatDate(time: number | string): string {
+    const d = new Date(time);
+    return `${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()]} ${d.getDate()}`;
   }
 
   private renderTaskCard(container: HTMLElement, task: VaultTask): void {
     const key = getTaskKey(task);
-    const cls = `kanban-card${task.completed ? " card-completed" : ""}${key === this.lastDroppedId ? " card-highlight" : ""}`;
+    const age = this.store.getTaskAge(key);
+    let ageClass = "age-fresh";
+    if (age >= 14) ageClass = "age-old";
+    else if (age >= 7) ageClass = "age-stale";
+    else if (age >= 3) ageClass = "age-warm";
+
+    const assignedCol = this.store.getTaskColumn(key);
+    const colDef = this.store.getColumns().find(c => c.id === assignedCol);
+    const isCompleted = colDef?.completesTask ?? false;
+
+    const cls = `kanban-card ${ageClass}${isCompleted ? " card-completed" : ""}${key === this.lastDroppedId ? " card-highlight" : ""}`;
     const card = container.createDiv({ cls });
     card.draggable = true;
     card.dataset.cardId = key;
 
     card.createEl("div", { text: task.text, cls: "card-title" });
-    const meta = card.createDiv({ cls: "card-meta" });
-    meta.createEl("span", { text: task.filePath.split("/").pop() || "", cls: "card-tag" });
 
-    card.addEventListener("click", async (e: MouseEvent) => {
-      // CMD/Ctrl click: open file
-      if (e.metaKey || e.ctrlKey) {
-        const file = this.app.vault.getAbstractFileByPath(task.filePath);
-        if (file instanceof TFile) {
-          const leaf = this.app.workspace.getLeaf(false);
-          await leaf.openFile(file, { eState: { line: task.line - 1 } });
-        }
-      } else {
-        // Normal click: open Issue Drawer
-        this.issueDrawer.open({
-          key: key,
-          title: task.text,
-          filePath: task.filePath,
-          line: task.line
-        });
+    if (this.showMetadata) {
+      const meta = card.createDiv({ cls: "card-meta" });
+      // File breadcrumb
+      const parts = task.filePath.split("/");
+      meta.createEl("span", { text: parts[parts.length - 1].replace(".md", ""), cls: "card-tag" });
+      // Tags
+      for (const tag of task.tags) {
+        meta.createEl("span", { text: tag, cls: "card-tag card-tag-accent" });
       }
-    });
 
-    card.addEventListener("dragstart", (e) => {
-      this.dragType = "task"; this.dragId = key; this.dragBoardType = "task";
-      card.addClass("card-dragging");
-    });
+      const info = card.createDiv({ cls: "card-info" });
+      info.createEl("span", { text: this.formatDate(task.ctime), cls: "card-date" });
+      info.createEl("span", { text: this.formatAge(Date.now() - task.ctime), cls: "card-date card-age" });
+    }
+
+    card.addEventListener("click", (e) => this.handleCardClick(e, key));
+    card.addEventListener("dragstart", () => { this.dragType = "task"; this.dragId = key; card.addClass("card-dragging"); });
     card.addEventListener("dragend", () => { this.resetDrag(); card.removeClass("card-dragging"); });
   }
 
   // ═══════════════════════════════════════════════════════
-  // Drop Zone (with insert indicator)
+  // Selection
   // ═══════════════════════════════════════════════════════
 
-  private setupCardDropZone(container: HTMLElement, col: ColumnDef, boardType: "claude" | "task"): void {
+  private handleCardClick(e: MouseEvent, key: string): void {
+    if (e.shiftKey && this.lastClickedKey) {
+      this.selectRange(this.lastClickedKey, key);
+    } else if (e.metaKey || e.ctrlKey) {
+      if (this.selectedKeys.has(key)) this.selectedKeys.delete(key);
+      else this.selectedKeys.add(key);
+    } else {
+      if (this.selectedKeys.size > 0) { this.selectedKeys.clear(); }
+      else { this.openDrawerForKey(key); return; }
+    }
+    this.lastClickedKey = key;
+    this.updateSelectionVisuals();
+  }
+
+  private selectRange(fromKey: string, toKey: string): void {
+    const allCards = Array.from(this.containerEl.querySelectorAll<HTMLElement>(".kanban-card[data-card-id]"));
+    const keys = allCards.map(c => c.dataset.cardId!);
+    const fromIdx = keys.indexOf(fromKey);
+    const toIdx = keys.indexOf(toKey);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [start, end] = fromIdx <= toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+    for (let i = start; i <= end; i++) this.selectedKeys.add(keys[i]);
+  }
+
+  private openDrawerForKey(key: string): void {
+    const task = this.tasks.find(t => getTaskKey(t) === key);
+    if (task) this.issueDrawer.open({ key, title: task.text, filePath: task.filePath, line: task.line });
+  }
+
+  private updateSelectionVisuals(): void {
+    this.containerEl.querySelectorAll(".kanban-card").forEach((card) => {
+      const el = card as HTMLElement;
+      const id = el.dataset.cardId;
+      if (id && this.selectedKeys.has(id)) el.addClass("card-selected");
+      else el.removeClass("card-selected");
+    });
+    this.render();
+  }
+
+  private renderBulkActionBar(root: HTMLElement): void {
+    const bar = root.createDiv({ cls: "bulk-action-bar" });
+
+    const info = bar.createDiv({ cls: "bulk-info" });
+    info.textContent = `${this.selectedKeys.size} selected`;
+
+    const cols = this.store.getColumns();
+    const actions = bar.createDiv({ cls: "bulk-actions" });
+
+    for (const col of cols) {
+      const btn = actions.createEl("button", { text: `→ ${col.label}`, cls: "bulk-action-btn" });
+      btn.addEventListener("click", async () => {
+        for (const key of this.selectedKeys) {
+          this.store.setTaskColumn(key, col.id);
+          const task = this.tasks.find(t => getTaskKey(t) === key);
+          if (task) await this.taskUpdater.updateTaskCompletion(task, col);
+        }
+        this.tasks = await this.scanner.scanTasks(this.store.getPinnedFilePaths());
+        this.selectedKeys.clear();
+        this.render();
+      });
+    }
+
+    const closeBtn = bar.createEl("button", { text: "✕", cls: "bulk-close-btn" });
+    closeBtn.addEventListener("click", () => { this.selectedKeys.clear(); this.render(); });
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // Lasso Selection
+  // ═══════════════════════════════════════════════════════
+
+  private setupLassoSelect(container: HTMLElement): void {
+    container.addEventListener("mousedown", (e) => {
+      if (e.target !== container) return;
+      if (e.button !== 0) return;
+      this.isSelecting = true;
+      this.selectionStart = { x: e.clientX, y: e.clientY };
+      this.selectedKeys.clear();
+
+      const rect = document.createElement("div");
+      rect.className = "selection-rect";
+      document.body.appendChild(rect);
+      this.selectionRectEl = rect;
+
+      const onMouseMove = (me: MouseEvent) => {
+        this.updateSelectionRect(me.clientX, me.clientY);
+        this.selectCardsInRect();
+      };
+      const onMouseUp = () => {
+        this.isSelecting = false;
+        this.selectionRectEl?.remove();
+        this.selectionRectEl = null;
+        this.selectionStart = null;
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+        if (this.selectedKeys.size > 0) this.updateSelectionVisuals();
+      };
+      document.addEventListener("mousemove", onMouseMove);
+      document.addEventListener("mouseup", onMouseUp);
+    });
+  }
+
+  private updateSelectionRect(cx: number, cy: number): void {
+    if (!this.selectionRectEl || !this.selectionStart) return;
+    const s = this.selectionStart;
+    Object.assign(this.selectionRectEl.style, {
+      left: `${Math.min(s.x, cx)}px`, top: `${Math.min(s.y, cy)}px`,
+      width: `${Math.abs(cx - s.x)}px`, height: `${Math.abs(cy - s.y)}px`,
+    });
+  }
+
+  private selectCardsInRect(): void {
+    if (!this.selectionRectEl) return;
+    const sRect = this.selectionRectEl.getBoundingClientRect();
+    this.selectedKeys.clear();
+    this.containerEl.querySelectorAll<HTMLElement>(".kanban-card[data-card-id]").forEach((card) => {
+      const r = card.getBoundingClientRect();
+      if (r.right > sRect.left && r.left < sRect.right && r.bottom > sRect.top && r.top < sRect.bottom) {
+        this.selectedKeys.add(card.dataset.cardId!);
+        card.addClass("card-selected");
+      } else {
+        card.removeClass("card-selected");
+      }
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // Drop Zone
+  // ═══════════════════════════════════════════════════════
+
+  private setupCardDropZone(container: HTMLElement, col: ColumnDef): void {
     container.addEventListener("dragover", (e) => {
-      const isCard = this.dragType === "session" || this.dragType === "task";
-      if (!isCard) return;
+      if (this.dragType !== "task") return;
       e.preventDefault();
       container.addClass("drop-active");
       this.showInsertIndicator(container, e.clientY);
@@ -479,139 +515,123 @@ export class BoardView extends ItemView {
       const insertIdx = this.getInsertIndex(container, e.clientY);
       this.clearInsertIndicator(container);
 
-      if (this.dragType === "session" && this.dragId) {
-        const dragId = this.dragId;
-        this.lastDroppedId = dragId;
-        this.store.updateStatus(dragId, col.id);
-        const newOrder = this.getCardIdsInColumn(container, dragId, insertIdx);
-        this.store.setCardOrder(col.id, newOrder);
-        this.resetDrag();
+      if (this.dragType === "task" && this.dragId) {
+        const dragIds = this.selectedKeys.has(this.dragId)
+          ? Array.from(this.selectedKeys)
+          : [this.dragId];
+        const primaryDragId = this.dragId;
+
+        this.lastDroppedId = primaryDragId;
+
+        for (const key of dragIds) {
+          this.store.setTaskColumn(key, col.id);
+          const task = this.tasks.find(t => getTaskKey(t) === key);
+          if (task) await this.taskUpdater.updateTaskCompletion(task, col);
+        }
+
+        let currentOrder = this.store.getCardOrder(col.id) || [];
+        currentOrder = currentOrder.filter(id => !dragIds.includes(id));
+        currentOrder.splice(insertIdx, 0, ...dragIds);
+        this.store.setCardOrder(col.id, currentOrder);
+
+        this.tasks = await this.scanner.scanTasks(this.store.getPinnedFilePaths());
+        this.selectedKeys.clear();
+        this.updateSelectionVisuals();
+        this.sortState.field = "manual";
+        this.render();
 
         setTimeout(() => {
           this.containerEl.querySelectorAll(".card-highlight").forEach(el => el.removeClass("card-highlight"));
-          if (this.lastDroppedId === dragId) this.lastDroppedId = null;
+          if (this.lastDroppedId === primaryDragId) this.lastDroppedId = null;
         }, 1500);
-      } else if (this.dragType === "task" && this.dragId) {
-        const dragId = this.dragId; // capture logic before reset
-        this.resetDrag(); // immediately reset ui
-        this.lastDroppedId = dragId;
-
-        this.store.setTaskColumn(dragId, col.id);
-        const newOrder = this.getCardIdsInColumn(container, dragId, insertIdx);
-        this.store.setCardOrder(col.id, newOrder);
-
-        const task = this.tasks.find((t) => getTaskKey(t) === dragId);
-        if (task) {
-          await this.taskUpdater.updateTaskCompletion(task, col);
-          // Wait briefly, then re-scan purely to get new text states if needed
-          this.tasks = await this.scanner.scanTasks();
-          this.render(); // View relies on tasks array state, redraw
-
-          // Remove highlight after 1.5s
-          setTimeout(() => {
-            this.containerEl.querySelectorAll(".card-highlight").forEach(el => el.removeClass("card-highlight"));
-            if (this.lastDroppedId === dragId) this.lastDroppedId = null;
-          }, 1500);
-        }
       }
     });
   }
 
   private getInsertIndex(container: HTMLElement, clientY: number): number {
-    const cards = Array.from(container.querySelectorAll(".kanban-card")) as HTMLElement[];
+    const cards = Array.from(container.querySelectorAll<HTMLElement>(".kanban-card"));
     for (let i = 0; i < cards.length; i++) {
-      const rect = cards[i].getBoundingClientRect();
-      if (clientY < rect.top + rect.height / 2) return i;
+      const r = cards[i].getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) return i;
     }
     return cards.length;
   }
 
   private getCardIdsInColumn(container: HTMLElement, insertedId: string, insertIdx: number): string[] {
-    const existing = Array.from(container.querySelectorAll(".kanban-card"))
-      .map((el) => (el as HTMLElement).dataset.cardId!)
-      .filter((id) => id !== insertedId);
+    const existing = Array.from(container.querySelectorAll<HTMLElement>(".kanban-card"))
+      .map(c => c.dataset.cardId!).filter(id => id !== insertedId);
     existing.splice(insertIdx, 0, insertedId);
     return existing;
   }
 
   private showInsertIndicator(container: HTMLElement, clientY: number): void {
     this.clearInsertIndicator(container);
-    const cards = Array.from(container.querySelectorAll(".kanban-card")) as HTMLElement[];
     const indicator = document.createElement("div");
     indicator.className = "insert-indicator";
-
-    let insertBefore: HTMLElement | null = null;
+    const cards = Array.from(container.querySelectorAll<HTMLElement>(".kanban-card"));
+    let inserted = false;
     for (const card of cards) {
-      if (clientY < card.getBoundingClientRect().top + card.getBoundingClientRect().height / 2) {
-        insertBefore = card; break;
-      }
+      const r = card.getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) { container.insertBefore(indicator, card); inserted = true; break; }
     }
-    if (insertBefore) container.insertBefore(indicator, insertBefore);
-    else container.appendChild(indicator);
+    if (!inserted) container.appendChild(indicator);
   }
 
   private clearInsertIndicator(container: HTMLElement): void {
-    container.querySelectorAll(".insert-indicator").forEach((el) => el.remove());
+    container.querySelectorAll(".insert-indicator").forEach(el => el.remove());
   }
 
   private clearColumnIndicators(board: HTMLElement): void {
-    board.querySelectorAll(".column-drop-left, .column-drop-right").forEach((el) => {
+    board.querySelectorAll(".column-drop-left, .column-drop-right").forEach(el => {
       el.removeClass("column-drop-left"); el.removeClass("column-drop-right");
     });
   }
 
   private resetDrag(): void {
-    this.dragType = null; this.dragId = null; this.dragBoardType = null;
-    this.containerEl.querySelectorAll(".insert-indicator").forEach((el) => el.remove());
-    this.containerEl.querySelectorAll(".drop-active").forEach((el) => el.removeClass("drop-active"));
-    this.containerEl.querySelectorAll(".column-drop-left, .column-drop-right").forEach((el) => {
+    this.dragType = null; this.dragId = null;
+    this.containerEl.querySelectorAll(".insert-indicator").forEach(el => el.remove());
+    this.containerEl.querySelectorAll(".drop-active").forEach(el => el.removeClass("drop-active"));
+    this.containerEl.querySelectorAll(".column-drop-left, .column-drop-right").forEach(el => {
       el.removeClass("column-drop-left"); el.removeClass("column-drop-right");
     });
-    this.containerEl.querySelectorAll(".tab-drop-left, .tab-drop-right").forEach((el) => {
-      el.removeClass("tab-drop-left"); el.removeClass("tab-drop-right");
-    });
   }
+
+  // ═══════════════════════════════════════════════════════
+  // Keyboard
+  // ═══════════════════════════════════════════════════════
+
+  public onKeyDown = (e: KeyboardEvent): void => {
+    if (e.key === "Escape" && this.selectedKeys.size > 0) {
+      this.selectedKeys.clear();
+      this.updateSelectionVisuals();
+    }
+  };
 
   // ═══════════════════════════════════════════════════════
   // Menu
   // ═══════════════════════════════════════════════════════
 
-  private showColumnMenu(e: Event, type: "claude" | "task", col: ColumnDef): void {
+  private showColumnMenu(e: Event, col: ColumnDef): void {
     const menu = new Menu();
-    menu.addItem((item) =>
+    menu.addItem(item =>
       item.setTitle("Edit column").setIcon("pencil").onClick(() => {
-        // Enforce at least 1 done column if this is the ONLY done column currently
-        let hideCompletesTask = false;
-        if (type === "task" && col.completesTask) {
-          const doneCols = this.store.getColumns("task").filter(c => c.completesTask);
-          if (doneCols.length <= 1) hideCompletesTask = true; 
-        }
-
-        new ColumnSettingsModal(
-          this.app, col, type, hideCompletesTask,
-          (updates) => this.store.updateColumn(type, col.id, updates)
+        const doneCols = this.store.getColumns().filter(c => c.completesTask);
+        const hideCompletesTask = col.completesTask && doneCols.length <= 1;
+        new ColumnSettingsModal(this.app, col, hideCompletesTask, (updates) =>
+          this.store.updateColumn(col.id, updates)
         ).open();
       })
     );
     menu.addSeparator();
-    menu.addItem((item) => {
+    menu.addItem(item => {
       item.setTitle("Delete column").setIcon("trash");
-      // Prevent deleting the only done column
-      let disabled = false;
-      if (type === "task" && col.completesTask) {
-        const doneCols = this.store.getColumns("task").filter(c => c.completesTask);
-        if (doneCols.length <= 1) disabled = true;
-      }
-      
-      if (disabled) {
+      const doneCols = this.store.getColumns().filter(c => c.completesTask);
+      if (col.completesTask && doneCols.length <= 1) {
         item.setDisabled(true);
       } else {
-        item.onClick(() => {
-          this.store.removeColumn(type, col.id);
-        });
+        item.onClick(() => this.store.removeColumn(col.id));
       }
     });
-
     if (e instanceof MouseEvent) menu.showAtMouseEvent(e);
   }
 }

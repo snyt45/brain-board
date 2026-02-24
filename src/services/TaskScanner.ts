@@ -6,12 +6,14 @@ export interface VaultTask {
   filePath: string;
   line: number;
   tags: string[];
+  ctime: number;
+  mtime: number;
 }
 
 export class TaskScanner {
   constructor(private plugin: Plugin) {}
 
-  async scanTasks(): Promise<VaultTask[]> {
+  async scanTasks(pinnedFiles?: string[]): Promise<VaultTask[]> {
     const tasks: VaultTask[] = [];
     const settings = (this.plugin as any).settings;
     const folder = settings?.taskDir || "";
@@ -23,9 +25,14 @@ export class TaskScanner {
       : files;
 
     const thresholdTime = scanPeriod ? Date.now() - scanPeriod * 24 * 60 * 60 * 1000 : 0;
-    const recentFiles = thresholdTime > 0 
-      ? targetFiles.filter((f) => f.stat.mtime > thresholdTime)
-      : targetFiles;
+    
+    // thresholdTime内のファイル、またはpinnedFilesに含まれるファイルのみ抽出
+    const recentFiles = targetFiles.filter((f) => {
+      // ユーザー要望により更新日時(mtime)ではなく作成日時(ctime)を採用
+      if (thresholdTime > 0 && f.stat.ctime > thresholdTime) return true;
+      if (pinnedFiles && pinnedFiles.includes(f.path)) return true;
+      return thresholdTime <= 0; // thresholdTimeがない場合は全スキャン
+    });
 
     for (const file of recentFiles) {
       const cache = this.plugin.app.metadataCache.getFileCache(file);
@@ -58,6 +65,8 @@ export class TaskScanner {
                 filePath: file.path,
                 line: lineIdx + 1, // 1-indexed for VaultTask
                 tags,
+                ctime: file.stat.ctime,
+                mtime: file.stat.mtime,
               });
            }
         }

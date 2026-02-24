@@ -1,100 +1,81 @@
 import { Plugin } from "obsidian";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
-import { SessionStatus, StoredSession } from "../models/Session";
 import { VaultTask, getTaskKey } from "../models/Task";
 import { ColumnDef, NO_STATUS_COLUMN } from "../models/Column";
 
+// ─── Data Model ───────────────────────────────────────
 interface StoreData {
-  sessions: StoredSession[];
-  claudeColumns: ColumnDef[];
-  obsidianColumns: ColumnDef[];
-  taskAssignments: Record<string, string>; // taskKey → columnId
-  cardOrder: Record<string, string[]>;     // columnId → cardId[]
-  tabOrder: string[];
+  columns: ColumnDef[];
+  taskAssignments: Record<string, string>;   // taskKey → columnId
+  cardOrder: Record<string, string[]>;       // columnId → cardId[]
+  taskMovedAt: Record<string, number>;       // taskKey → timestamp (ms)
 }
 
-const DEFAULT_CLAUDE_COLUMNS: ColumnDef[] = [
-  { id: "todo", label: "Todo", description: "", color: "#868e96" },
-  { id: "doing", label: "Doing", description: "", color: "#e5a00d" },
-  { id: "done", label: "Done", description: "", color: "#2da44e" },
-];
-
-const DEFAULT_TASK_COLUMNS: ColumnDef[] = [
-  { id: "todo", label: "Todo", description: "", color: "#868e96", completesTask: false },
+const DEFAULT_COLUMNS: ColumnDef[] = [
+  { id: "todo",  label: "Todo",  description: "", color: "#868e96", completesTask: false },
   { id: "doing", label: "Doing", description: "", color: "#e5a00d", completesTask: false },
-  { id: "done", label: "Done", description: "", color: "#2da44e", completesTask: true },
+  { id: "done",  label: "Done",  description: "", color: "#2da44e", completesTask: true  },
 ];
 
+// ─── Store ────────────────────────────────────────────
 export class SessionStore {
   private filePath: string;
   private data: StoreData;
-  private subscriptions: Set<() => void> = new Set();
+  private subscriptions = new Set<() => void>();
 
   constructor(plugin: Plugin, customPath?: string) {
     const vaultPath = (plugin.app.vault.adapter as any).getBasePath();
-    const oldStoreDir = join(vaultPath, ".claude-board");
-    const oldFilePath = join(oldStoreDir, "sessions.json");
 
     let storeDir = join(vaultPath, ".brain-board");
     if (customPath) {
-      if (customPath.startsWith("/")) storeDir = customPath;
-      else storeDir = join(vaultPath, customPath);
+      storeDir = customPath.startsWith("/") ? customPath : join(vaultPath, customPath);
     }
+    if (!existsSync(storeDir)) mkdirSync(storeDir, { recursive: true });
 
     this.filePath = join(storeDir, "sessions.json");
 
-    // Migration from old directory if exists
-    if (!existsSync(storeDir)) mkdirSync(storeDir, { recursive: true });
-    
-    if (existsSync(oldFilePath) && !existsSync(this.filePath)) {
+    // Legacy migration: .claude-board → .brain-board
+    const oldPath = join(vaultPath, ".claude-board", "sessions.json");
+    if (existsSync(oldPath) && !existsSync(this.filePath)) {
       try {
-        const data = readFileSync(oldFilePath, "utf-8");
-        writeFileSync(this.filePath, data, "utf-8");
-        plugin.app.workspace.trigger("notice", "Brain Board: Migrated old data successfully.");
-      } catch (e) {
-        console.error("Brain Board Migration Failed:", e);
-      }
+        writeFileSync(this.filePath, readFileSync(oldPath, "utf-8"), "utf-8");
+      } catch { /* migration best-effort */ }
     }
 
     this.data = this.load();
   }
 
-  // ─── Event Emitter ─────────────────────────────────────
-  subscribe(callback: () => void): () => void {
-    this.subscriptions.add(callback);
-    return () => this.subscriptions.delete(callback);
+  // ─── Event Emitter ─────────────────────────────────
+  subscribe(cb: () => void): () => void {
+    this.subscriptions.add(cb);
+    return () => this.subscriptions.delete(cb);
   }
+  private emit(): void { for (const cb of this.subscriptions) cb(); }
 
-  private emit(): void {
-    for (const callback of this.subscriptions) callback();
-  }
-
+  // ─── Persistence ───────────────────────────────────
   private load(): StoreData {
     const defaults: StoreData = {
-      sessions: [], claudeColumns: DEFAULT_CLAUDE_COLUMNS,
-      obsidianColumns: DEFAULT_TASK_COLUMNS, taskAssignments: {}, cardOrder: {},
-      tabOrder: ["tasks", "claude"],
+      columns: DEFAULT_COLUMNS, taskAssignments: {},
+      cardOrder: {}, taskMovedAt: {},
     };
     if (!existsSync(this.filePath)) return defaults;
     try {
       const raw = JSON.parse(readFileSync(this.filePath, "utf-8"));
-      const migrateCols = (cols: any[], defs: ColumnDef[]): ColumnDef[] => {
-        if (!cols) return defs;
-        return cols.map((c: any) => ({
-          id: c.id, label: c.label,
-          description: c.description || "",
-          color: c.color || "#868e96",
-          completesTask: c.completesTask || false,
-        })).filter(c => c.id !== NO_STATUS_COLUMN.id); // Filter out old no_status if any
-      };
+      // Migrate from old format (obsidianColumns / claudeColumns)
+      const cols = raw.columns || raw.obsidianColumns;
       return {
-        sessions: raw.sessions || [],
-        claudeColumns: migrateCols(raw.claudeColumns, DEFAULT_CLAUDE_COLUMNS),
-        obsidianColumns: migrateCols(raw.obsidianColumns, DEFAULT_TASK_COLUMNS),
+        columns: cols
+          ? cols.map((c: any) => ({
+              id: c.id, label: c.label,
+              description: c.description || "",
+              color: c.color || "#868e96",
+              completesTask: c.completesTask || false,
+            })).filter((c: ColumnDef) => c.id !== NO_STATUS_COLUMN.id)
+          : DEFAULT_COLUMNS,
         taskAssignments: raw.taskAssignments || {},
         cardOrder: raw.cardOrder || {},
-        tabOrder: raw.tabOrder || ["tasks", "claude"],
+        taskMovedAt: raw.taskMovedAt || {},
       };
     } catch { return defaults; }
   }
@@ -102,194 +83,140 @@ export class SessionStore {
   private saveSilent(): void {
     writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), "utf-8");
   }
+  private save(): void { this.saveSilent(); this.emit(); }
 
-  private save(): void {
-    this.saveSilent();
-    this.emit();
-  }
-
-  // ─── Sessions ─────────────────────────────────────────
-  getSessions(): StoredSession[] { return this.data.sessions; }
-
-  getSessionsByStatus(status: SessionStatus): StoredSession[] {
-    return this.data.sessions.filter((s) => s.status === status);
-  }
-
-  getOrderedSessionsByStatus(status: SessionStatus): StoredSession[] {
-    const sessions = this.getSessionsByStatus(status);
-    const order = this.data.cardOrder[status];
-    if (!order) return sessions;
-    const indexed = new Map(sessions.map((s) => [s.id, s]));
-    const ordered: StoredSession[] = [];
-    for (const id of order) {
-      const s = indexed.get(id);
-      if (s) { ordered.push(s); indexed.delete(id); }
-    }
-    for (const s of indexed.values()) ordered.push(s);
-    return ordered;
-  }
-
-  upsertSession(session: Omit<StoredSession, "status">, defaultStatus: SessionStatus = NO_STATUS_COLUMN.id): void {
-    const existing = this.data.sessions.find((s) => s.id === session.id);
-    if (existing) {
-      existing.summary = session.summary;
-      existing.modified = session.modified;
-      existing.messageCount = session.messageCount;
-      if (session.fullPath) existing.fullPath = session.fullPath;
-    } else {
-      this.data.sessions.push({ ...session, status: defaultStatus });
-    }
-    this.save();
-  }
-
-  updateStatus(sessionId: string, newStatus: SessionStatus): void {
-    const session = this.data.sessions.find((s) => s.id === sessionId);
-    if (!session) return;
-    const oldOrder = this.data.cardOrder[session.status];
-    if (oldOrder) {
-      this.data.cardOrder[session.status] = oldOrder.filter((id) => id !== sessionId);
-    }
-    session.status = newStatus;
-    this.save();
-  }
-
+  // ─── Reset ─────────────────────────────────────────
   reset(): void {
-    this.data = {
-      sessions: [], 
-      claudeColumns: DEFAULT_CLAUDE_COLUMNS,
-      obsidianColumns: DEFAULT_TASK_COLUMNS, 
-      taskAssignments: {}, 
-      cardOrder: {},
-      tabOrder: ["tasks", "claude"],
-    };
+    this.data = { columns: DEFAULT_COLUMNS, taskAssignments: {}, cardOrder: {}, taskMovedAt: {} };
     this.save();
   }
 
-  getCardOrder(columnId: string): string[] | undefined {
-    return this.data.cardOrder[columnId];
-  }
-
+  // ─── Card Order ────────────────────────────────────
+  getCardOrder(columnId: string): string[] | undefined { return this.data.cardOrder[columnId]; }
   setCardOrder(columnId: string, order: string[]): void {
     this.data.cardOrder[columnId] = order;
     this.save();
   }
 
-  getTabOrder(): string[] {
-    return this.data.tabOrder || ["tasks", "claude"];
-  }
-
-  setTabOrder(order: string[]): void {
-    this.data.tabOrder = order;
-    this.save();
-  }
-
-  syncFromClaude(
-    claudeSessions: { project: string; sessions: import("./ClaudeReader").ClaudeSession[] }[]
-  ): void {
-    for (const { project, sessions } of claudeSessions) {
-      for (const cs of sessions) {
-        this.upsertSession({
-          id: cs.sessionId, project, summary: cs.summary,
-          created: cs.created, modified: cs.modified,
-          messageCount: cs.messageCount, gitBranch: cs.gitBranch,
-          fullPath: cs.fullPath,
-        });
-      }
-    }
-  }
-
-  // ─── Task Assignments ─────────────────────────────────
+  // ─── Task Assignments ──────────────────────────────
   getTaskColumn(taskKey: string): string | undefined {
     return this.data.taskAssignments[taskKey];
   }
 
   setTaskColumn(taskKey: string, columnId: string): void {
+    if (this.data.taskAssignments[taskKey] !== columnId) {
+      this.data.taskMovedAt[taskKey] = Date.now();
+    }
     this.data.taskAssignments[taskKey] = columnId;
-    this.save();
-  }
-
-  removeTaskAssignment(taskKey: string): void {
-    delete this.data.taskAssignments[taskKey];
     this.save();
   }
 
   syncTaskAssignments(tasks: VaultTask[], columns: ColumnDef[]): void {
     let changed = false;
-    
+
     for (const task of tasks) {
       const key = getTaskKey(task);
       const assignedCol = this.data.taskAssignments[key];
-      
-      const assignedColDef = columns.find(c => c.id === assignedCol);
-      const isAssignedValid = assignedColDef && (
-        (task.completed && assignedColDef.completesTask) ||
-        (!task.completed && !assignedColDef.completesTask)
+      const colDef = columns.find(c => c.id === assignedCol);
+      const isValid = colDef && (
+        (task.completed && colDef.completesTask) ||
+        (!task.completed && !colDef.completesTask)
       );
 
-      if (!isAssignedValid) {
+      if (!isValid) {
         let newCol = NO_STATUS_COLUMN.id;
         if (task.completed) {
           const doneCols = columns.filter(c => c.completesTask);
-          if (doneCols.length > 0) {
-             newCol = doneCols[doneCols.length - 1].id;
+          if (doneCols.length > 0) newCol = doneCols[doneCols.length - 1].id;
+          else {
+            // Fallback: find "done" by name or use last column
+            const fallback = columns.find(c => c.id.toLowerCase() === "done") || columns[columns.length - 1];
+            if (fallback) newCol = fallback.id;
           }
         }
-        
         if (this.data.taskAssignments[key] !== newCol) {
           this.data.taskAssignments[key] = newCol;
+          this.data.taskMovedAt[key] = Date.now();
           changed = true;
         }
       }
+
+      // Ensure age tracking exists for all tasks
+      if (!this.data.taskMovedAt[key]) {
+        this.data.taskMovedAt[key] = Date.now();
+        changed = true;
+      }
     }
-    
-    if (changed) {
-      this.saveSilent();
+
+    // Garbage-collect stale assignments
+    const currentKeys = new Set(tasks.map(t => getTaskKey(t)));
+    for (const key of Object.keys(this.data.taskAssignments)) {
+      if (!currentKeys.has(key)) {
+        delete this.data.taskAssignments[key];
+        delete this.data.taskMovedAt[key];
+        changed = true;
+      }
     }
+    for (const key of Object.keys(this.data.taskMovedAt)) {
+      if (!currentKeys.has(key)) {
+        delete this.data.taskMovedAt[key];
+        changed = true;
+      }
+    }
+
+    if (changed) this.saveSilent();
   }
 
-  // ─── Columns ──────────────────────────────────────────
-  getColumns(type: "claude" | "task"): ColumnDef[] {
-    const cols = type === "claude" ? this.data.claudeColumns : this.data.obsidianColumns;
-    return [NO_STATUS_COLUMN, ...cols];
+  // ─── Pinned Files ──────────────────────────────────
+  getPinnedFilePaths(): string[] {
+    const paths = new Set<string>();
+    for (const [key, colId] of Object.entries(this.data.taskAssignments)) {
+      if (colId !== NO_STATUS_COLUMN.id) {
+        const filePath = key.split("::")[0];
+        if (filePath) paths.add(filePath);
+      }
+    }
+    return Array.from(paths);
   }
 
-  setColumns(type: "claude" | "task", columns: ColumnDef[]): void {
-    const filtered = columns.filter((c) => c.id !== NO_STATUS_COLUMN.id);
-    if (type === "claude") this.data.claudeColumns = filtered;
-    else this.data.obsidianColumns = filtered;
-    this.save();
+  // ─── Task Age ──────────────────────────────────────
+  getTaskAge(key: string): number {
+    const movedAt = this.data.taskMovedAt[key];
+    if (!movedAt) return 0;
+    return Math.floor((Date.now() - movedAt) / (24 * 60 * 60 * 1000));
   }
 
-  addColumn(type: "claude" | "task", column: ColumnDef): void {
+  // ─── Columns ───────────────────────────────────────
+  getColumns(): ColumnDef[] {
+    return [NO_STATUS_COLUMN, ...this.data.columns];
+  }
+
+  addColumn(column: ColumnDef): void {
     if (column.id === NO_STATUS_COLUMN.id) return;
-    if (type === "claude") this.data.claudeColumns.push(column);
-    else this.data.obsidianColumns.push(column);
+    this.data.columns.push(column);
     this.save();
   }
 
-  removeColumn(type: "claude" | "task", columnId: string): void {
+  removeColumn(columnId: string): void {
     if (columnId === NO_STATUS_COLUMN.id) return;
-    const target = type === "claude" ? this.data.claudeColumns : this.data.obsidianColumns;
-    this.setColumns(type, target.filter((c) => c.id !== columnId));
+    this.data.columns = this.data.columns.filter(c => c.id !== columnId);
+    this.save();
   }
 
-  updateColumn(type: "claude" | "task", columnId: string, updates: Partial<ColumnDef>): void {
+  updateColumn(columnId: string, updates: Partial<ColumnDef>): void {
     if (columnId === NO_STATUS_COLUMN.id) return;
-    const target = type === "claude" ? this.data.claudeColumns : this.data.obsidianColumns;
-    const col = target.find((c) => c.id === columnId);
+    const col = this.data.columns.find(c => c.id === columnId);
     if (col) { Object.assign(col, updates); this.save(); }
   }
 
-  moveColumn(type: "claude" | "task", columnId: string, newIndex: number): void {
-    if (columnId === NO_STATUS_COLUMN.id) return; 
-    // newIndex includes NO_STATUS_COLUMN, so subtract 1 for the internal array
-    const adjustedIndex = Math.max(0, newIndex - 1);
-    
-    const cols = type === "claude" ? this.data.claudeColumns : this.data.obsidianColumns;
-    const idx = cols.findIndex((c) => c.id === columnId);
+  moveColumn(columnId: string, newIndex: number): void {
+    if (columnId === NO_STATUS_COLUMN.id) return;
+    const adjustedIndex = Math.max(0, newIndex - 1); // account for NO_STATUS
+    const cols = this.data.columns;
+    const idx = cols.findIndex(c => c.id === columnId);
     if (idx < 0 || idx === adjustedIndex) return;
     const [col] = cols.splice(idx, 1);
     cols.splice(adjustedIndex, 0, col);
-    this.setColumns(type, cols);
+    this.save();
   }
 }
