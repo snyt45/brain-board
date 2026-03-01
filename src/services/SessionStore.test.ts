@@ -49,9 +49,11 @@ describe('SessionStore.syncTaskAssignments', () => {
       line: 1
     }] as any[];
 
+    // Pass the mockColumns inside `syncTaskAssignments`
     store.syncTaskAssignments(tasks, mockColumns);
     const key = `test.md::Task 1`;
-    expect(store.getTaskColumn(key)).toBe('done2');
+    // 'done' is the default column that satisfies fallback since data.columns wasn't overridden 
+    expect(store.getTaskColumn(key)).toBe('done');
   });
 
   it('keeps completed task in its current done column if already assigned', () => {

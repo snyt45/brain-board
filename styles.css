@@ -14,10 +14,10 @@
 .board-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 10px 16px;
+  gap: 12px;
+  padding: 14px 24px;
   border-bottom: 1px solid var(--background-modifier-border);
-  background: var(--background-primary);
+  background: var(--background-primary-alt);
   flex-shrink: 0;
 }
 
@@ -25,28 +25,97 @@
 
 .sort-toggle,
 .board-control-btn {
-  font-size: 11px;
-  font-weight: 500;
-  padding: 4px 10px;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-muted);
-  border: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 8px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.2s ease;
   letter-spacing: 0.02em;
 }
 
 .sort-toggle:hover,
 .board-control-btn:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
+  border-color: var(--interactive-accent);
+  color: var(--interactive-accent);
 }
 
 .sort-toggle-active {
-  background: var(--background-secondary-alt);
-  color: var(--text-normal);
-  border-color: var(--background-modifier-border);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+.sort-toggle-active:hover {
+  color: var(--text-on-accent);
+}
+
+.board-sort-group {
+  display: flex;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.board-control-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.board-control-icon-btn:hover {
+  border-color: var(--interactive-accent);
+  color: var(--interactive-accent);
+}
+
+.board-control-icon-btn.sort-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.board-sort-group .board-control-icon-btn {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.board-sort-group .board-control-icon-btn.sort-active {
+  background: var(--interactive-accent);
+}
+
+.board-sort-group .board-control-icon-btn:not(:last-child) {
+  border-right: 1px solid var(--background-modifier-border);
+}
+
+.board-sort-group .board-control-icon-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.board-sort-group .board-control-icon-btn.sort-active:hover {
+  background: var(--interactive-accent);
+}
+
+.triage-trigger-btn {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+  box-shadow: 0 4px 12px rgba(var(--interactive-accent-rgb), 0.2);
+}
+.triage-trigger-btn:hover {
+  opacity: 0.9;
+  color: var(--text-on-accent);
 }
 
 /* ── Board Content ─────────────────────────────────── */
@@ -260,7 +329,8 @@
 }
 
 .kanban-card:hover {
-  border-color: var(--interactive-accent);
+  outline: 1px solid var(--interactive-accent);
+  outline-offset: -1px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.06);
   transform: translateY(-1px);
 }
@@ -281,11 +351,23 @@
   filter: grayscale(80%);
 }
 
-/* Age Indicators - subtle left accent */
+/* Age Indicators - pronounced decay */
+/* Instead of using opacity, shift colors to look "faded/dusty" and reduce text contrast to simulate aging */
 .kanban-card.age-fresh { border-left: 3px solid transparent; }
 .kanban-card.age-warm  { border-left: 3px solid #eab308; }
-.kanban-card.age-stale { border-left: 3px solid #f97316; }
-.kanban-card.age-old   { border-left: 3px solid #ef4444; }
+.kanban-card.age-stale { 
+  border-left: 3px solid #f97316; 
+  background-color: var(--background-secondary-alt); 
+}
+.kanban-card.age-old   { 
+  border-left: 3px solid #ef4444; 
+  background-color: var(--background-secondary); 
+}
+
+.kanban-card.age-old .card-title,
+.kanban-card.age-stale .card-title {
+  color: var(--text-muted);
+}
 
 .card-highlight {
   animation: cardHighlight 1.5s ease-out forwards;
@@ -301,13 +383,30 @@
   font-weight: 500;
   color: var(--text-normal);
   line-height: 1.45;
-  word-break: break-word;
+  word-break: break-word; /* Ensure wrapping instead of overflow */
+  margin-bottom: 6px; /* Space between title and meta row */
 }
 
 .card-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  align-items: center; /* Align badges and text vertically */
+  gap: 6px;
+}
+
+.card-type-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.card-type-file .card-type-badge {
+    color: var(--color-blue);
+}
+
+.card-type-task .card-type-badge {
+    color: var(--color-green);
 }
 
 .card-tag {
@@ -638,9 +737,9 @@ body.is-resizing-ew * {
    ═══════════════════════════════════════════════════════ */
 
 .kanban-card.card-selected {
-  border-color: var(--interactive-accent);
-  background-color: rgba(var(--interactive-accent-rgb), 0.08);
-  box-shadow: 0 0 0 1px var(--interactive-accent);
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: -1px;
+  background-color: rgba(var(--interactive-accent-rgb), 0.08) !important;
 }
 
 .selection-rect {
@@ -697,6 +796,80 @@ body.is-resizing-ew * {
   border-color: var(--interactive-accent);
   background: rgba(var(--interactive-accent-rgb), 0.06);
 }
+
+/* ═══════════════════════════════════════════════════════
+   Inbox Triage Modal
+   ═══════════════════════════════════════════════════════ */
+.inbox-triage-modal .modal-content {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 80vh;
+}
+.triage-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.triage-progress { font-size: 13px; color: var(--text-muted); font-weight: 600; }
+.triage-card {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.triage-meta { display: flex; gap: 8px; align-items: center; }
+.triage-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--background-secondary-alt);
+  font-weight: 500;
+}
+.triage-badge.type-file { color: var(--color-blue); }
+.triage-badge.type-task { color: var(--color-green); }
+.triage-path { font-size: 12px; color: var(--text-faint); font-family: monospace; }
+.triage-title { margin: 0; font-size: 20px; color: var(--text-normal); line-height: 1.3; font-weight: 600; }
+.triage-preview {
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--background-secondary);
+  border-radius: 8px;
+  border: 1px solid var(--background-modifier-border);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-normal);
+  user-select: text;
+}
+.triage-divider { margin: 0; border-top: 1px solid var(--background-modifier-border); }
+.triage-actions, .triage-cols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 20px 24px;
+}
+.triage-cols { background: var(--background-secondary-alt); justify-content: center; }
+.triage-actions { justify-content: space-between; padding-top: 16px; padding-bottom: 32px; }
+.triage-btn {
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  transition: all 0.15s ease;
+}
+.triage-btn:hover { background: var(--background-modifier-hover); }
+.triage-btn.discard { border-color: rgba(239, 68, 68, 0.5); color: #ef4444; }
+.triage-btn.discard:hover { background: rgba(239, 68, 68, 0.1); }
+.triage-btn.keep { border-color: var(--text-muted); color: var(--text-muted); }
+.triage-col-btn { background: var(--background-primary); }
 
 .bulk-close-btn {
   background: transparent;

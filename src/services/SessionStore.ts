@@ -1,8 +1,9 @@
 import { Plugin } from "obsidian";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join } from "path";
-import { VaultTask, getTaskKey } from "../models/Task";
+import { VaultItem, getTaskKey } from "../models/Task";
 import { ColumnDef, NO_STATUS_COLUMN } from "../models/Column";
+import { BOARD_CONSTANTS } from "../constants";
 
 // ─── Data Model ───────────────────────────────────────
 interface StoreData {
@@ -24,7 +25,7 @@ export class SessionStore {
   private data: StoreData;
   private subscriptions = new Set<() => void>();
 
-  constructor(plugin: Plugin, customPath?: string) {
+  constructor(public plugin: Plugin, customPath?: string) {
     const vaultPath = (plugin.app.vault.adapter as any).getBasePath();
 
     let storeDir = join(vaultPath, ".brain-board");
@@ -111,29 +112,62 @@ export class SessionStore {
     this.save();
   }
 
-  syncTaskAssignments(tasks: VaultTask[], columns: ColumnDef[]): void {
+  syncTaskAssignments(tasks: VaultItem[], columns: ColumnDef[]): void {
     let changed = false;
+    const trackingProp = (this.plugin as any).settings?.trackingProperty || "board-status";
 
     for (const task of tasks) {
       const key = getTaskKey(task);
       const assignedCol = this.data.taskAssignments[key];
       const colDef = columns.find(c => c.id === assignedCol);
-      const isValid = colDef && (
-        (task.completed && colDef.completesTask) ||
-        (!task.completed && !colDef.completesTask)
-      );
+      
+      let isValid = false;
+
+      if (task.type === "file") {
+        const file = this.plugin.app.vault.getAbstractFileByPath(task.filePath);
+        if (file) {
+           const cache = this.plugin.app.metadataCache.getFileCache(file as any);
+           if (cache && cache.frontmatter && cache.frontmatter[trackingProp]) {
+              const currentPropVal = cache.frontmatter[trackingProp];
+              if (!assignedCol || assignedCol !== currentPropVal) {
+                 isValid = false; 
+              } else {
+                 isValid = true;
+              }
+           } else {
+              isValid = !!assignedCol;
+           }
+        }
+      } else {
+        isValid = !!(colDef && (
+          (task.completed && colDef.completesTask) ||
+          (!task.completed && !colDef.completesTask)
+        ));
+      }
 
       if (!isValid) {
         let newCol = NO_STATUS_COLUMN.id;
-        if (task.completed) {
-          const doneCols = columns.filter(c => c.completesTask);
+        
+        if (task.type === "file") {
+            const file = this.plugin.app.vault.getAbstractFileByPath(task.filePath);
+            if (file) {
+               const cache = this.plugin.app.metadataCache.getFileCache(file as any);
+               if (cache && cache.frontmatter && cache.frontmatter[trackingProp]) {
+                  const prop = cache.frontmatter[trackingProp];
+                  const matchCol = columns.find(c => c.id === prop);
+                  if (matchCol) newCol = matchCol.id;
+               }
+            }
+        } else if (task.completed) {
+          const doneCols = this.data.columns.filter(c => c.completesTask && c.id !== BOARD_CONSTANTS.ARCHIVED_STATUS);
           if (doneCols.length > 0) newCol = doneCols[doneCols.length - 1].id;
           else {
-            // Fallback: find "done" by name or use last column
-            const fallback = columns.find(c => c.id.toLowerCase() === "done") || columns[columns.length - 1];
+            // Fallback: find "done" by name or use last non-archive column
+            const fallback = this.data.columns.find(c => c.id.toLowerCase() === "done" && c.id !== BOARD_CONSTANTS.ARCHIVED_STATUS) || doneCols[doneCols.length - 1];
             if (fallback) newCol = fallback.id;
           }
         }
+        
         if (this.data.taskAssignments[key] !== newCol) {
           this.data.taskAssignments[key] = newCol;
           this.data.taskMovedAt[key] = Date.now();
@@ -188,29 +222,36 @@ export class SessionStore {
 
   // ─── Columns ───────────────────────────────────────
   getColumns(): ColumnDef[] {
-    return [NO_STATUS_COLUMN, ...this.data.columns];
+    const archiveCol: ColumnDef = {
+      id: BOARD_CONSTANTS.ARCHIVED_STATUS,
+      label: "Archive",
+      description: "System lane for archived items",
+      color: "#475569",
+      completesTask: true
+    };
+    return [NO_STATUS_COLUMN, ...this.data.columns, archiveCol];
   }
 
   addColumn(column: ColumnDef): void {
-    if (column.id === NO_STATUS_COLUMN.id) return;
+    if (column.id === NO_STATUS_COLUMN.id || column.id === BOARD_CONSTANTS.ARCHIVED_STATUS) return;
     this.data.columns.push(column);
     this.save();
   }
 
   removeColumn(columnId: string): void {
-    if (columnId === NO_STATUS_COLUMN.id) return;
+    if (columnId === NO_STATUS_COLUMN.id || columnId === BOARD_CONSTANTS.ARCHIVED_STATUS) return;
     this.data.columns = this.data.columns.filter(c => c.id !== columnId);
     this.save();
   }
 
   updateColumn(columnId: string, updates: Partial<ColumnDef>): void {
-    if (columnId === NO_STATUS_COLUMN.id) return;
+    if (columnId === NO_STATUS_COLUMN.id || columnId === BOARD_CONSTANTS.ARCHIVED_STATUS) return;
     const col = this.data.columns.find(c => c.id === columnId);
     if (col) { Object.assign(col, updates); this.save(); }
   }
 
   moveColumn(columnId: string, newIndex: number): void {
-    if (columnId === NO_STATUS_COLUMN.id) return;
+    if (columnId === NO_STATUS_COLUMN.id || columnId === BOARD_CONSTANTS.ARCHIVED_STATUS) return;
     const adjustedIndex = Math.max(0, newIndex - 1); // account for NO_STATUS
     const cols = this.data.columns;
     const idx = cols.findIndex(c => c.id === columnId);

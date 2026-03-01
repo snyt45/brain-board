@@ -10,7 +10,7 @@ export interface ColumnDef {
 export const NO_STATUS_COLUMN: ColumnDef = {
   id: "no_status",
   label: "No Status",
-  description: "",
+  description: "System lane for untriaged items",
   color: "#545d68",
   completesTask: false,
 };

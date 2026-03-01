@@ -1,13 +1,17 @@
-import { ItemView, WorkspaceLeaf, Menu, TFile } from "obsidian";
+import { ItemView, WorkspaceLeaf, Menu, TFile, setIcon } from "obsidian";
 import { SessionStore } from "../services/SessionStore";
 import { TaskScanner } from "../services/TaskScanner";
 import { TaskUpdater } from "../services/TaskUpdater";
 import { IssueManager } from "../services/IssueManager";
 import { ColumnSettingsModal } from "./components/ColumnSettingsModal";
 import { IssueDrawer } from "./components/IssueDrawer";
-import { VaultTask, getTaskKey } from "../models/Task";
+import { VaultItem, getTaskKey } from "../models/Task";
 import { ColumnDef, NO_STATUS_COLUMN } from "../models/Column";
+import { InboxTriageModal } from "../modals/InboxTriageModal";
+import { TaskArchiver } from "../services/TaskArchiver";
+import { CardRenderer } from "../services/CardRenderer";
 import type BrainBoardPlugin from "../../main";
+import { UI_CONSTANTS, BOARD_CONSTANTS } from "../constants";
 
 export const BOARD_VIEW_TYPE = "brain-board-view";
 
@@ -20,7 +24,7 @@ export class BoardView extends ItemView {
   // View state
   private sortState: { field: "manual" | "created" | "modified"; dir: "desc" | "asc" } = { field: "manual", dir: "desc" };
   private showMetadata = true;
-  private tasks: VaultTask[] = [];
+  private tasks: VaultItem[] = [];
   private unsubscribe: (() => void) | null = null;
 
   // Drag & drop state
@@ -43,7 +47,7 @@ export class BoardView extends ItemView {
     this.plugin = plugin;
     this.store = store;
     this.scanner = new TaskScanner(plugin);
-    this.taskUpdater = new TaskUpdater(this.app);
+    this.taskUpdater = new TaskUpdater(this.app, plugin);
     this.issueManager = new IssueManager(plugin);
   }
 
@@ -60,14 +64,12 @@ export class BoardView extends ItemView {
     this.unsubscribe = this.store.subscribe(() => this.render());
     await this.refresh();
     document.addEventListener("keydown", this.onKeyDown);
-
     this.registerEvent(
       this.app.workspace.on("brain-board:refresh" as any, () => this.refresh())
     );
     this.registerEvent(
-      this.app.metadataCache.on("changed", (file) => {
-        const targetDir = this.plugin.settings.taskDir;
-        if (!targetDir || file.path.startsWith(targetDir)) this.refresh();
+      this.app.metadataCache.on("changed", () => {
+         this.refresh();
       })
     );
   }
@@ -128,30 +130,59 @@ export class BoardView extends ItemView {
 
     const toggleSort = (field: "created" | "modified") => {
       if (state.field === field) {
-        if (state.dir === "desc") state.dir = "asc";
+        if (state.dir === "asc") state.dir = "desc";
         else { state.field = "manual"; state.dir = "desc"; }
       } else {
-        state.field = field; state.dir = "desc";
+        state.field = field;
+        state.dir = "asc";
       }
       this.render();
     };
 
-    const mkBtn = (label: string, field: "created" | "modified") => {
-      const arrow = state.field === field ? (state.dir === "desc" ? " ↓" : " ↑") : "";
-      const cls = `sort-toggle${state.field === field ? " sort-toggle-active" : ""}`;
-      const btn = controls.createEl("button", { text: label + arrow, cls });
+    // Sort Controls
+    const sortGroup = controls.createDiv({ cls: "board-sort-group" });
+    const mkSortBtn = (field: "created" | "modified", iconName: string, tooltip: string) => {
+      const btn = sortGroup.createEl("button", { cls: "board-control-icon-btn sort-btn" });
+      if (state.field === field) btn.addClass("sort-active");
+      
+      const iconSpan = btn.createSpan({ cls: "sort-icon" });
+      setIcon(iconSpan, iconName);
+      
+      if (state.field === field) {
+        btn.createSpan({ text: state.dir === "desc" ? "↓" : "↑", cls: "sort-arrow" });
+      }
+      
+      btn.setAttribute("aria-label", tooltip);
       btn.addEventListener("click", () => toggleSort(field));
     };
-    mkBtn("Created", "created");
-    mkBtn("Modified", "modified");
+    
+    mkSortBtn("created", "calendar", `Sort by Created Time`);
+    mkSortBtn("modified", "clock", `Sort by Modified Time`);
+
+    // View Options (Metadata toggle)
+    const viewBtn = controls.createEl("button", { cls: "board-control-icon-btn" });
+    setIcon(viewBtn, this.showMetadata ? "eye" : "eye-off");
+    viewBtn.setAttribute("aria-label", this.showMetadata ? "Hide Metadata (Tags/Path)" : "Show Metadata (Tags/Path)");
+    viewBtn.addEventListener("click", () => { this.showMetadata = !this.showMetadata; this.render(); });
 
     controls.createDiv({ cls: "board-control-spacer" });
 
-    const metaBtn = controls.createEl("button", {
-      text: this.showMetadata ? "Hide Meta" : "Show Meta",
-      cls: "board-control-btn"
+    // Primary Action (Triage)
+    const triageBtn = controls.createEl("button", {
+      text: UI_CONSTANTS.BUTTON_TRIAGE,
+      cls: "board-control-btn triage-trigger-btn"
     });
-    metaBtn.addEventListener("click", () => { this.showMetadata = !this.showMetadata; this.render(); });
+    const triageIcon = triageBtn.createSpan({ cls: "triage-btn-icon" });
+    setIcon(triageIcon, "zap"); // Lucide icon
+
+    triageBtn.addEventListener("click", () => {
+      const inboxTasks = this.tasks.filter(t => {
+          const key = getTaskKey(t);
+          const col = this.store.getTaskColumn(key);
+          return col === NO_STATUS_COLUMN.id || !col;
+      });
+      new InboxTriageModal(this.app, this.plugin, inboxTasks).open();
+    });
   }
 
   // ═══════════════════════════════════════════════════════
@@ -171,7 +202,7 @@ export class BoardView extends ItemView {
     this.renderAddColumnBtn(board);
   }
 
-  private getOrderedTasks(tasks: VaultTask[], colId: string): VaultTask[] {
+  private getOrderedTasks(tasks: VaultItem[], colId: string): VaultItem[] {
     const order = this.store.getCardOrder(colId);
     let ordered = tasks;
     if (order) {
@@ -190,8 +221,8 @@ export class BoardView extends ItemView {
     return ordered;
   }
 
-  private assignTasksToColumns(columns: ColumnDef[]): Map<string, VaultTask[]> {
-    const result = new Map<string, VaultTask[]>();
+  private assignTasksToColumns(columns: ColumnDef[]): Map<string, VaultItem[]> {
+    const result = new Map<string, VaultItem[]>();
     for (const col of columns) result.set(col.id, []);
 
     const scanPeriod = this.plugin.settings.taskScanPeriod;
@@ -211,11 +242,11 @@ export class BoardView extends ItemView {
   // Column
   // ═══════════════════════════════════════════════════════
 
-  private renderColumn(board: HTMLElement, col: ColumnDef, index: number, tasks: VaultTask[]): void {
+  private renderColumn(board: HTMLElement, col: ColumnDef, index: number, tasks: VaultItem[]): void {
     const column = board.createDiv({ cls: "kanban-column" });
     column.dataset.columnId = col.id;
     column.dataset.columnIndex = String(index);
-    const isSystemCol = col.id === NO_STATUS_COLUMN.id;
+    const isSystemCol = col.id === NO_STATUS_COLUMN.id || col.id === BOARD_CONSTANTS.ARCHIVED_STATUS;
 
     // ── Header ──
     const header = column.createDiv({ cls: "kanban-column-header" });
@@ -310,54 +341,50 @@ export class BoardView extends ItemView {
   // Cards
   // ═══════════════════════════════════════════════════════
 
-  private formatAge(ms: number): string {
-    const days = Math.floor(ms / 86400000);
-    if (days === 0) return "Today";
-    if (days === 1) return "1d ago";
-    return `${days}d ago`;
+  private formatDate = (ts: number): string => {
+    const d = new Date(ts);
+    const today = new Date();
+    if (d.toDateString() === today.toDateString()) return "今日";
+    return `${d.getFullYear()}/${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`;
   }
 
-  private formatDate(time: number | string): string {
-    const d = new Date(time);
-    return `${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()]} ${d.getDate()}`;
+  private formatAge = (ms: number): string => {
+    const d = Math.floor(ms / (24 * 60 * 60 * 1000));
+    if (d === 0) return "今日";
+    return `${d}日前`;
   }
 
-  private renderTaskCard(container: HTMLElement, task: VaultTask): void {
+  private renderTaskCard(container: HTMLElement, task: VaultItem): void {
     const key = getTaskKey(task);
     const age = this.store.getTaskAge(key);
-    let ageClass = "age-fresh";
-    if (age >= 14) ageClass = "age-old";
-    else if (age >= 7) ageClass = "age-stale";
-    else if (age >= 3) ageClass = "age-warm";
-
+    
     const assignedCol = this.store.getTaskColumn(key);
     const colDef = this.store.getColumns().find(c => c.id === assignedCol);
     const isCompleted = colDef?.completesTask ?? false;
-
-    const cls = `kanban-card ${ageClass}${isCompleted ? " card-completed" : ""}${key === this.lastDroppedId ? " card-highlight" : ""}`;
-    const card = container.createDiv({ cls });
-    card.draggable = true;
-    card.dataset.cardId = key;
-
-    card.createEl("div", { text: task.text, cls: "card-title" });
-
-    if (this.showMetadata) {
-      const meta = card.createDiv({ cls: "card-meta" });
-      // File breadcrumb
-      const parts = task.filePath.split("/");
-      meta.createEl("span", { text: parts[parts.length - 1].replace(".md", ""), cls: "card-tag" });
-      // Tags
-      for (const tag of task.tags) {
-        meta.createEl("span", { text: tag, cls: "card-tag card-tag-accent" });
-      }
-
-      const info = card.createDiv({ cls: "card-info" });
-      info.createEl("span", { text: this.formatDate(task.ctime), cls: "card-date" });
-      info.createEl("span", { text: this.formatAge(Date.now() - task.ctime), cls: "card-date card-age" });
-    }
-
+    
+    const archiver = new TaskArchiver(this.app, this.plugin);
+    const renderer = new CardRenderer(
+        this.app, 
+        this.plugin, 
+        archiver, 
+        this.lastDroppedId, 
+        this.showMetadata, 
+        this.formatDate, 
+        this.formatAge
+    );
+    
+    const card = renderer.render(container, task, age, isCompleted);
+    
     card.addEventListener("click", (e) => this.handleCardClick(e, key));
-    card.addEventListener("dragstart", () => { this.dragType = "task"; this.dragId = key; card.addClass("card-dragging"); });
+    card.addEventListener("dragstart", (e) => { 
+      if (e.metaKey || e.ctrlKey) {
+        e.preventDefault();
+        return;
+      }
+      this.dragType = "task"; 
+      this.dragId = key; 
+      card.addClass("card-dragging"); 
+    });
     card.addEventListener("dragend", () => { this.resetDrag(); card.removeClass("card-dragging"); });
   }
 
@@ -391,7 +418,14 @@ export class BoardView extends ItemView {
 
   private openDrawerForKey(key: string): void {
     const task = this.tasks.find(t => getTaskKey(t) === key);
-    if (task) this.issueDrawer.open({ key, title: task.text, filePath: task.filePath, line: task.line });
+    if (task) {
+      this.issueDrawer.open({ 
+        key, 
+        title: task.text, 
+        filePath: task.filePath, 
+        line: task.line ?? 0 
+      });
+    }
   }
 
   private updateSelectionVisuals(): void {
@@ -401,7 +435,24 @@ export class BoardView extends ItemView {
       if (id && this.selectedKeys.has(id)) el.addClass("card-selected");
       else el.removeClass("card-selected");
     });
-    this.render();
+    
+    // Manage Bulk Action Bar visibility without full re-render
+    const root = this.containerEl.children[1] as HTMLElement;
+    const existingBar = root.querySelector(".bulk-action-bar");
+    const controls = root.querySelector(".board-controls") as HTMLElement;
+    
+    if (this.selectedKeys.size > 0) {
+        if (!existingBar) {
+            const tempDiv = document.createElement("div");
+            this.renderBulkActionBar(tempDiv);
+            root.insertBefore(tempDiv.firstElementChild!, controls ? controls.nextSibling : root.firstChild);
+        } else {
+            const info = existingBar.querySelector(".bulk-info");
+            if (info) info.textContent = `${this.selectedKeys.size} selected`;
+        }
+    } else {
+        if (existingBar) existingBar.remove();
+    }
   }
 
   private renderBulkActionBar(root: HTMLElement): void {
@@ -437,7 +488,8 @@ export class BoardView extends ItemView {
 
   private setupLassoSelect(container: HTMLElement): void {
     container.addEventListener("mousedown", (e) => {
-      if (e.target !== container) return;
+      // Allow marquee selection if started on background OR if Cmd/Ctrl is held
+      if (e.target !== container && !e.metaKey && !e.ctrlKey) return;
       if (e.button !== 0) return;
       this.isSelecting = true;
       this.selectionStart = { x: e.clientX, y: e.clientY };
@@ -615,9 +667,9 @@ export class BoardView extends ItemView {
     const menu = new Menu();
     menu.addItem(item =>
       item.setTitle("Edit column").setIcon("pencil").onClick(() => {
-        const doneCols = this.store.getColumns().filter(c => c.completesTask);
-        const hideCompletesTask = col.completesTask && doneCols.length <= 1;
-        new ColumnSettingsModal(this.app, col, hideCompletesTask, (updates) =>
+        const completedCols = this.store.getColumns().filter(c => c.completesTask);
+        const hideCompletesTask = col.completesTask && completedCols.length <= 1;
+        new ColumnSettingsModal(this.app, col, !!hideCompletesTask, (updates) =>
           this.store.updateColumn(col.id, updates)
         ).open();
       })

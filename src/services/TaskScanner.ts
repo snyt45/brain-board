@@ -1,74 +1,107 @@
 import { Plugin, TFile } from "obsidian";
-
-export interface VaultTask {
-  text: string;
-  completed: boolean;
-  filePath: string;
-  line: number;
-  tags: string[];
-  ctime: number;
-  mtime: number;
-}
+import { VaultItem } from "../models/Task";
+import type BrainBoardPlugin from "../../main";
+import { BOARD_CONSTANTS, MARKDOWN_CONSTANTS } from "../constants";
 
 export class TaskScanner {
   constructor(private plugin: Plugin) {}
 
-  async scanTasks(pinnedFiles?: string[]): Promise<VaultTask[]> {
-    const tasks: VaultTask[] = [];
+  async scanTasks(pinnedFiles?: string[]): Promise<VaultItem[]> {
+    const tasks: VaultItem[] = [];
     const settings = (this.plugin as any).settings;
-    const folder = settings?.taskDir || "";
+    
+    // Parse the 3-layer paths
+    const excludePaths = (settings?.excludePaths || "").split(',').map((s: string) => s.trim()).filter(Boolean);
+    const autoInboxPaths = (settings?.autoInboxPaths || "").split(',').map((s: string) => s.trim()).filter(Boolean);
+    const taskSearchPaths = (settings?.taskSearchPaths || "").split(',').map((s: string) => s.trim()).filter(Boolean);
+    
+    // Status prop fallback
+    const statusProperty = settings?.statusProperty || BOARD_CONSTANTS.STATUS_PROPERTY;
     const scanPeriod = settings?.taskScanPeriod; // number or undefined
 
     const files = this.plugin.app.vault.getMarkdownFiles();
-    const targetFiles = folder 
-      ? files.filter((f) => f.path.startsWith(folder))
-      : files;
-
     const thresholdTime = scanPeriod ? Date.now() - scanPeriod * 24 * 60 * 60 * 1000 : 0;
     
-    // thresholdTime内のファイル、またはpinnedFilesに含まれるファイルのみ抽出
-    const recentFiles = targetFiles.filter((f) => {
-      // ユーザー要望により更新日時(mtime)ではなく作成日時(ctime)を採用
-      if (thresholdTime > 0 && f.stat.ctime > thresholdTime) return true;
-      if (pinnedFiles && pinnedFiles.includes(f.path)) return true;
-      return thresholdTime <= 0; // thresholdTimeがない場合は全スキャン
-    });
+    for (const file of files) {
+      // 0. Time Filter
+      if (thresholdTime > 0 && file.stat.ctime <= thresholdTime) {
+         if (!pinnedFiles || !pinnedFiles.includes(file.path)) {
+            continue;
+         }
+      }
 
-    for (const file of recentFiles) {
+      // 1. Global Excludes
+      const isExcluded = excludePaths.some((ex: string) => file.path.startsWith(ex));
+      if (isExcluded) continue;
+
       const cache = this.plugin.app.metadataCache.getFileCache(file);
-      if (!cache || !cache.listItems) continue;
+      if (!cache) continue;
+      
+      let isFileCard = false;
 
-      // Extract only list items that are tasks (have a checkbox)
-      const taskItems = cache.listItems.filter((item) => item.task !== undefined);
-      if (taskItems.length === 0) continue;
+      // 2. Auto-Inbox Path Check
+      if (autoInboxPaths.length > 0 && autoInboxPaths.some((p: string) => file.path.startsWith(p))) {
+        isFileCard = true;
+      }
 
-      // We still need the file content to get the actual text and exact completion status,
-      // but we only read files that we KNOW have tasks.
-      const content = await this.plugin.app.vault.cachedRead(file);
-      const lines = content.split("\n");
+      // 3. Property Tracker Check
+      if (!isFileCard && cache.frontmatter && cache.frontmatter[statusProperty] !== undefined) {
+        if (cache.frontmatter[statusProperty] !== BOARD_CONSTANTS.ARCHIVED_STATUS) {
+           isFileCard = true;
+        }
+      }
 
-      for (const item of taskItems) {
-        // listItems.position.start.line is 0-indexed
-        const lineIdx = item.position.start.line;
-        if (lineIdx >= 0 && lineIdx < lines.length) {
-           const lineText = lines[lineIdx];
-           const taskMatch = lineText.match(/^(\s*)- \[([ x])\] (.+)$/i);
-           
-           if (taskMatch) {
-              const completed = taskMatch[2].toLowerCase() === "x";
-              const text = taskMatch[3].trim();
-              const tags = this.extractTags(text);
+      // Push File Card if matched
+      if (isFileCard) {
+        const fallbackTags = this.extractTags(file.basename);
+        tasks.push({
+          type: "file",
+          text: file.basename,
+          completed: false,
+          filePath: file.path,
+          line: undefined,
+          tags: cache.frontmatter?.tags ? (Array.isArray(cache.frontmatter.tags) ? cache.frontmatter.tags : [cache.frontmatter.tags]) : fallbackTags,
+          ctime: file.stat.ctime,
+          mtime: file.stat.mtime
+        });
+      }
 
-              tasks.push({
-                text,
-                completed,
-                filePath: file.path,
-                line: lineIdx + 1, // 1-indexed for VaultTask
-                tags,
-                ctime: file.stat.ctime,
-                mtime: file.stat.mtime,
-              });
-           }
+      // 4. Task Search Path Check
+      let isTaskSearchable = taskSearchPaths.length === 0; // Empty means scan entire vault
+      if (!isTaskSearchable) {
+         isTaskSearchable = taskSearchPaths.some((p: string) => file.path.startsWith(p));
+      }
+
+      if (isTaskSearchable && cache.listItems) {
+        const taskItems = cache.listItems.filter((item) => item.task !== undefined);
+        if (taskItems.length > 0) {
+          const content = await this.plugin.app.vault.cachedRead(file);
+          const lines = content.split("\n");
+
+          for (const item of taskItems) {
+            const lineIdx = item.position.start.line;
+            if (lineIdx >= 0 && lineIdx < lines.length) {
+               const lineText = lines[lineIdx];
+               const taskMatch = lineText.match(MARKDOWN_CONSTANTS.TASK_REGEX);
+               
+               if (taskMatch) {
+                  const completed = taskMatch[2].toLowerCase() === "x";
+                  const text = taskMatch[3].trim();
+                  const tags = this.extractTags(text);
+
+                  tasks.push({
+                    type: "task",
+                    text,
+                    completed,
+                    filePath: file.path,
+                    line: lineIdx + 1,
+                    tags,
+                    ctime: file.stat.ctime,
+                    mtime: file.stat.mtime,
+                  });
+               }
+            }
+          }
         }
       }
     }

@@ -4,13 +4,19 @@ import { BoardView, BOARD_VIEW_TYPE } from "./src/views/BoardView";
 import { BrainBoardSettingTab } from "./src/settings";
 
 export interface BrainBoardSettings {
-  taskDir: string;
+  taskSearchPaths: string;
+  excludePaths: string;
+  autoInboxPaths: string;
+  statusProperty: string;
   storageDir: string;
   taskScanPeriod?: number;
 }
 
 const DEFAULT_SETTINGS: BrainBoardSettings = {
-  taskDir: "10_Journal",
+  taskSearchPaths: "10_Journal",
+  excludePaths: "Templates",
+  autoInboxPaths: "",
+  statusProperty: "board-status",
   storageDir: ".brain-board",
   taskScanPeriod: 7,
 };
